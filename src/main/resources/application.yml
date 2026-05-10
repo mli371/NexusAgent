@@ -1,0 +1,35 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: nexus-agent
+  config:
+    import: optional:file:.env[.properties]
+  webflux:
+    multipart:
+      max-in-memory-size: ${NEXUS_MULTIPART_MAX_IN_MEMORY_SIZE:1MB}
+      max-disk-usage-per-part: ${NEXUS_MULTIPART_MAX_DISK_USAGE_PER_PART:30MB}
+      max-parts: ${NEXUS_MULTIPART_MAX_PARTS:4}
+  r2dbc:
+    url: r2dbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexusagent}
+    username: ${POSTGRES_USER:nexus}
+    password: ${POSTGRES_PASSWORD:nexus}
+  flyway:
+    enabled: true
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexusagent}
+    user: ${POSTGRES_USER:nexus}
+    password: ${POSTGRES_PASSWORD:nexus}
+  codec:
+    max-in-memory-size: 1MB
+
+nexus:
+  upload:
+    max-file-size-bytes: ${NEXUS_UPLOAD_MAX_FILE_SIZE_BYTES:26214400}
+  storage:
+    minio:
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ROOT_USER:minioadmin}
+      secret-key: ${MINIO_ROOT_PASSWORD:minioadmin123}
+      bucket: ${MINIO_BUCKET:nexus-documents}
+      operation-timeout: ${MINIO_OPERATION_TIMEOUT:10s}
