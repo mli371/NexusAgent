@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.reactive.resource.NoResourceFoundException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ServerWebExchange;
@@ -29,6 +30,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ServerWebInputException.class)
     public ResponseEntity<ApiError> handleInputError(ServerWebInputException exception, ServerWebExchange exchange) {
         return buildError(HttpStatus.BAD_REQUEST, "Invalid request input", exchange);
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException exception, ServerWebExchange exchange) {
+        return buildError(HttpStatus.NOT_FOUND, "Route not found", exchange);
     }
 
     @ExceptionHandler(Throwable.class)

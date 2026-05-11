@@ -26,6 +26,10 @@ spring:
 nexus:
   upload:
     max-file-size-bytes: ${NEXUS_UPLOAD_MAX_FILE_SIZE_BYTES:26214400}
+  chunking:
+    parent-max-chars: ${NEXUS_CHUNKING_PARENT_MAX_CHARS:1200}
+    child-max-chars: ${NEXUS_CHUNKING_CHILD_MAX_CHARS:400}
+    child-overlap-chars: ${NEXUS_CHUNKING_CHILD_OVERLAP_CHARS:80}
   storage:
     minio:
       endpoint: ${MINIO_ENDPOINT:http://localhost:9000}

@@ -32,6 +32,8 @@ Out of scope:
 
 ## Milestone 2: Text Extraction + Parent-Child Chunking
 
+Status: Implemented.
+
 Extract text from stored documents and split it into parent and child chunks. Parent chunks support context expansion, while child chunks support precise retrieval in later milestones.
 
 Expected scope:

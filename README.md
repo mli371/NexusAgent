@@ -2,7 +2,7 @@
 
 NexusAgent is an Enterprise Knowledge Assistant Backend built as an interview-defensible Java backend project.
 
-Milestone 1 implements the foundation for raw document upload:
+Implemented milestones:
 
 - Spring Boot 3.x WebFlux application
 - PostgreSQL metadata storage
@@ -10,8 +10,11 @@ Milestone 1 implements the foundation for raw document upload:
 - MinIO raw file storage
 - Redis in local Docker Compose for future milestones
 - REST APIs for health, upload, list, and fetch-by-id
+- Text extraction for `text/plain`, `.txt`, Markdown content types, `.md`, and `.markdown`
+- Parent-child chunking with PostgreSQL persistence
+- APIs to extract/chunk a document and inspect stored chunks
 
-Milestone 1 does not implement text extraction, chunking, embeddings, retrieval, query answering, SSE, or Redis-backed state/cache behavior.
+The project still does not implement embeddings, retrieval, query answering, SSE, or Redis-backed state/cache behavior.
 
 ## Tech Stack
 
@@ -65,6 +68,9 @@ Application upload max: 25 MiB
 Multipart disk usage per part: 30 MiB
 Multipart in-memory threshold: 1 MiB
 Multipart max parts: 4
+Parent chunk max chars: 1200
+Child chunk max chars: 400
+Child chunk overlap chars: 80
 ```
 
 ## Start Local Dependencies
@@ -171,6 +177,59 @@ List documents:
 curl "http://localhost:8080/api/v1/documents?limit=50&offset=0"
 ```
 
+Extract and chunk a supported text document:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/documents/{document-id}/chunks
+```
+
+By default this endpoint is idempotent. If chunks already exist for the document, it returns the stored chunks without deleting or regenerating them, so chunk IDs and chunk `createdAt` values stay stable.
+
+Force regeneration only when you intentionally want to replace the existing chunks:
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/documents/{document-id}/chunks?force=true"
+```
+
+Inspect stored chunks:
+
+```bash
+curl http://localhost:8080/api/v1/documents/{document-id}/chunks
+```
+
+Example chunk response shape:
+
+```json
+{
+  "documentId": "7bfc50c2-81f9-49df-872f-f401f8fbff20",
+  "parentChunkCount": 1,
+  "childChunkCount": 2,
+  "parentChunks": [
+    {
+      "id": "parent uuid",
+      "chunkIndex": 0,
+      "text": "larger context block",
+      "charStart": 0,
+      "charEnd": 1200,
+      "tokenCount": 180,
+      "createdAt": "2026-05-10T12:00:00Z"
+    }
+  ],
+  "childChunks": [
+    {
+      "id": "child uuid",
+      "parentChunkId": "parent uuid",
+      "chunkIndex": 0,
+      "text": "smaller retrieval-focused window",
+      "charStart": 0,
+      "charEnd": 400,
+      "tokenCount": 60,
+      "createdAt": "2026-05-10T12:00:00Z"
+    }
+  ]
+}
+```
+
 ## Run Tests
 
 ```bash
@@ -181,9 +240,15 @@ The test suite includes:
 
 - Application context startup test
 - Document upload service unit tests
+- Text extraction unit tests
+- Parent-child chunking unit tests
+- Chunking idempotency and force-regeneration unit tests
+- Document chunking status update unit tests
+- Empty extracted text validation test
 - PostgreSQL metadata persistence integration test
+- Parent-child chunk persistence integration test
 
-The persistence integration test uses Testcontainers with the `pgvector/pgvector:pg16` image. If Docker is not available to Testcontainers, that test is skipped.
+The persistence integration tests use Testcontainers with the `pgvector/pgvector:pg16` image. If Docker is not available to Testcontainers, those tests are skipped.
 
 ## Troubleshooting Local PostgreSQL
 
@@ -286,7 +351,7 @@ Client multipart upload
   -> API response
 ```
 
-MinIO stores the raw file. PostgreSQL stores source-of-truth metadata. Redis is available in Docker Compose for later milestones but is not used in Milestone 1.
+MinIO stores the raw file. PostgreSQL stores source-of-truth metadata and chunks. Redis is available in Docker Compose for later milestones but is not used through Milestone 2.
 
 Flyway uses the JDBC PostgreSQL driver because Flyway is a blocking schema migration tool. Runtime metadata persistence uses R2DBC through Spring's reactive `DatabaseClient`.
 
@@ -312,13 +377,14 @@ The multipart disk limit is slightly larger than the application file limit so t
 
 ## Blocking Client Trade-Off
 
-The MinIO Java client and local file hashing are blocking operations. Milestone 1 isolates them behind service boundaries and runs them on Reactor `boundedElastic`:
+The MinIO Java client and local file hashing are blocking operations. The project isolates them behind service boundaries and runs them on Reactor `boundedElastic`:
 
 - `MinioObjectStorageService`
 - `UploadedFileInspector`
 - temporary file creation/deletion inside `DocumentUploadService`
+- MinIO reads used by text extraction
 
-This keeps the WebFlux request flow from doing blocking file/object-storage work on event-loop threads. The trade-off is that Milestone 1 buffers uploads to a temporary local file instead of streaming directly from the HTTP request into object storage.
+This keeps the WebFlux request flow from doing blocking file/object-storage work on event-loop threads. The trade-off is that uploads are buffered to a temporary local file before object storage, and extraction reads the raw object bytes through the MinIO client.
 
 Temporary file cleanup is handled with Reactor `usingWhen`, which is the reactive equivalent of a composed finally block. It runs cleanup on completion, error, and cancellation.
 
@@ -326,14 +392,49 @@ If MinIO object storage succeeds but PostgreSQL metadata persistence fails, the 
 
 Flyway uses JDBC at startup because Flyway is a blocking migration tool. Request-time document metadata reads and writes use R2DBC through Spring's reactive `DatabaseClient`.
 
+## Milestone 2 Design
+
+Milestone 2 adds extraction and chunking for text and Markdown documents.
+
+Chunking flow:
+
+```text
+POST /api/v1/documents/{id}/chunks
+  -> look up document metadata in PostgreSQL
+  -> if chunks already exist and force=false, return stored chunks unchanged
+  -> otherwise read raw object from MinIO
+  -> extract UTF-8 text for supported text/Markdown files
+  -> split parent chunks as larger context blocks
+  -> split child chunks as smaller overlapping windows inside each parent
+  -> transactionally replace stored chunks in PostgreSQL
+```
+
+Parent chunks are larger blocks used later for context expansion. Child chunks are smaller sliding-window chunks intended for precise retrieval in Milestone 3 and Milestone 4. Milestone 2 stores the parent-child structure only; it does not embed chunks or search them.
+
+Stable chunk IDs matter because later embeddings, retrieval results, citations, and retrieval-cache entries will point at `child_chunk_id` and `parent_chunk_id`. For that reason, `POST /api/v1/documents/{id}/chunks` is idempotent by default. Passing `force=true` explicitly deletes and regenerates chunks, which may create new IDs.
+
+Supported extraction inputs:
+
+- `text/plain`
+- `text/markdown`
+- `text/x-markdown`
+- `application/markdown`
+- `.txt`
+- `.md`
+- `.markdown`
+
+Unsupported formats such as PDF and Word return a clear validation error for now.
+
 ## Known Limitations
 
-- No text extraction yet.
-- No parent-child chunking yet.
+- Text extraction only supports UTF-8 plain text and Markdown-like files.
+- PDF and Word extraction are not implemented yet.
 - No embeddings or PgVector vector search yet.
 - No retrieval, RRF, reranking, context construction, query answering, or SSE yet.
 - Redis is only started by Docker Compose; the application does not use it yet.
 - Uploads are written to a temporary local file before MinIO storage.
+- `force=true` replacement deletes and recreates chunks for a document, but there is no chunk-version history or audit trail yet.
+- Token counts are approximate whitespace counts, not model-token counts.
 - If MinIO upload succeeds but PostgreSQL persistence fails, Milestone 1 attempts best-effort MinIO cleanup. An orphaned object can still remain if cleanup also fails.
 - There is no authentication, tenant isolation, malware scanning, file type policy, or production observability yet.
 - Docker images are intended for local development, not production deployment.
@@ -342,6 +443,7 @@ Flyway uses JDBC at startup because Flyway is a blocking migration tool. Request
 
 - Add an outbox/reconciliation flow for partial upload failures that remain after best-effort cleanup.
 - Add document status transitions for extraction and ingestion.
-- Add text extraction and chunk persistence in Milestone 2.
 - Add PgVector embedding storage in Milestone 3.
+- Add PDF and Word extractors behind the `DocumentTextExtractor` interface.
+- Add model-aware token counting.
 - Add authentication and tenant-aware access control in a later hardening milestone.

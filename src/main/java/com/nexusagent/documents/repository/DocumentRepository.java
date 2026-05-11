@@ -84,6 +84,21 @@ public class DocumentRepository {
                 .one();
     }
 
+    public Mono<Void> updateStatus(UUID id, DocumentStatus status, OffsetDateTime updatedAt) {
+        return databaseClient.sql("""
+                        UPDATE documents
+                        SET status = :status,
+                            updated_at = :updatedAt
+                        WHERE id = :id
+                        """)
+                .bind("id", id)
+                .bind("status", status.name())
+                .bind("updatedAt", updatedAt)
+                .fetch()
+                .rowsUpdated()
+                .then();
+    }
+
     public Flux<DocumentMetadata> findAll(int limit, int offset) {
         return databaseClient.sql("""
                         SELECT

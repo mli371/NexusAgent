@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.minio.BucketExistsArgs;
+import io.minio.GetObjectArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
@@ -46,6 +47,20 @@ public class MinioObjectStorageService implements ObjectStorageService {
                 .subscribeOn(Schedulers.boundedElastic())
                 .timeout(properties.getOperationTimeout())
                 .then();
+    }
+
+    @Override
+    public Mono<byte[]> read(String bucket, String objectKey) {
+        return Mono.fromCallable(() -> {
+                    try (InputStream inputStream = minioClient.getObject(GetObjectArgs.builder()
+                            .bucket(bucket)
+                            .object(objectKey)
+                            .build())) {
+                        return inputStream.readAllBytes();
+                    }
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .timeout(properties.getOperationTimeout());
     }
 
     private StoredObject storeBlocking(Path sourcePath, String objectKey, String contentType) throws Exception {

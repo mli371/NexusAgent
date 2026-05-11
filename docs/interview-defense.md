@@ -75,7 +75,57 @@ Production changes:
 
 ### Milestone 2: Text Extraction + Parent-Child Chunking
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- `DocumentTextExtractor` interface
+- Text/Markdown extraction from raw MinIO objects
+- `parent_chunks` table
+- `child_chunks` table
+- Parent-child chunking service
+- APIs to extract/chunk a document and inspect chunks
+- Tests for extraction, parent splitting, child sliding windows, relationships, empty text, short documents, long paragraphs, idempotency, force regeneration, and status updates
+
+How to explain it:
+
+> I added a deterministic ingestion stage after raw upload. For supported text and Markdown files, the service reads the original object from MinIO, extracts UTF-8 text, creates larger parent chunks for context, then creates smaller overlapping child chunks inside each parent. The child chunks are the future retrieval units; the parent chunks are the future context-expansion units.
+
+Design defense:
+
+- Extraction is behind `DocumentTextExtractor`, so PDF and Word support can be added without rewriting the chunking pipeline.
+- Parent chunks and child chunks are stored in separate tables because they have different future roles.
+- Child chunks include `parent_chunk_id`, so retrieval can later find precise child hits and expand to the parent context.
+- The algorithm is deterministic and testable. It uses paragraph-aware parent splitting and character-window child splitting with overlap.
+- Chunking is idempotent by default, which keeps chunk IDs stable for future embeddings, retrieval results, citations, and cache entries.
+- `force=true` is the explicit regeneration path when source content or chunking rules change.
+- MinIO reads are still blocking through the MinIO SDK and remain isolated behind `ObjectStorageService` on `boundedElastic`.
+
+Failure behavior:
+
+- Unsupported file types return a clear bad-request error.
+- Blank extracted text is rejected before chunk persistence.
+- Missing documents return 404.
+- Successful chunking marks the document `CHUNKED`.
+- Failed chunking attempts mark the document `CHUNKING_FAILED` when practical.
+- Re-running chunking without `force=true` returns existing chunks unchanged.
+- `force=true` deletes old child chunks and parent chunks, then inserts regenerated chunks inside the repository transaction boundary.
+
+Known limitations:
+
+- Only plain text and Markdown-like files are supported.
+- PDF and Word extraction are not implemented.
+- Token counts are approximate whitespace counts.
+- No embeddings, vector search, hybrid retrieval, reranking, query answering, Redis state/cache, or SSE exist yet.
+- Chunk sizes are character-based, not model-token-based.
+- Forced regeneration can invalidate future embeddings, citations, and caches, but invalidation is not needed until those features exist.
+
+Production changes:
+
+- Add robust PDF and Office extractors.
+- Add language-aware and model-token-aware chunking.
+- Add chunk versioning or an ingestion-job audit table for regeneration history.
+- Add observability around extraction duration, chunk counts, and failures.
 
 ### Milestone 3: Embedding Pipeline + PgVector
 

@@ -10,7 +10,7 @@ The system is designed as an interview-defensible backend project: clear boundar
 
 ## Current Architecture
 
-Milestone 1 is implemented.
+Milestones 1 and 2 are implemented.
 
 ```text
 Client
@@ -37,7 +37,34 @@ GET /api/v1/documents
 GET /api/v1/health
 ```
 
-Redis is available in Docker Compose but is not used by the application in Milestone 1.
+Redis is available in Docker Compose but is not used by the application through Milestone 2.
+
+Milestone 2 adds text extraction and parent-child chunking:
+
+```text
+POST /api/v1/documents/{id}/chunks
+  |
+  v
+DocumentChunkingService
+  |
+  +-- DocumentRepository -> load document metadata
+  +-- ChunkRepository -> return existing chunks when force=false and chunks already exist
+  +-- DocumentTextExtractionService
+  |     +-- PlainTextDocumentTextExtractor
+  |     +-- ObjectStorageService -> read raw MinIO object
+  |
+  +-- ParentChildChunker
+  |     +-- parent chunks: larger context blocks
+  |     +-- child chunks: smaller overlapping retrieval windows
+  |
+  +-- ChunkRepository -> transactionally replace PostgreSQL parent_chunks and child_chunks when missing or forced
+```
+
+Chunk inspection API:
+
+```text
+GET /api/v1/documents/{id}/chunks
+```
 
 ## Target Architecture
 
@@ -77,7 +104,9 @@ Spring Boot WebFlux API
 ## Storage Responsibilities
 
 - MinIO stores raw uploaded files.
-- PostgreSQL stores source-of-truth document metadata in Milestone 1.
+- PostgreSQL stores source-of-truth document metadata and chunk metadata.
+- `parent_chunks` stores larger context blocks.
+- `child_chunks` stores smaller windows with `parent_chunk_id` relationships.
 - PgVector is enabled by Flyway in Milestone 1 for later vector embedding storage.
 - Redis stores short-lived session state, retrieval cache entries, and intermediate tool outputs after Milestone 7.
 
@@ -90,6 +119,7 @@ WebFlux and Reactor are used to compose I/O-bound stages. Blocking libraries mus
 Examples that may require isolation:
 
 - MinIO SDK operations: isolated in `MinioObjectStorageService` on `boundedElastic`
+- MinIO object reads for text extraction: isolated in `MinioObjectStorageService` on `boundedElastic`
 - File hashing: isolated in `UploadedFileInspector` on `boundedElastic`
 - Temporary file creation/deletion: isolated in `DocumentUploadService` on `boundedElastic`
 - Text extraction libraries
@@ -121,14 +151,19 @@ com.nexusagent
 
 - Start as one backend service to keep the system understandable and runnable.
 - Use interfaces at external integration boundaries rather than abstracting every class.
+- Add `DocumentTextExtractor` as an extension point for PDF and Word later, while implementing only text and Markdown now.
+- Store child chunks separately from parent chunks to make the future embedding table naturally point at child chunks.
+- Keep chunking idempotent by default because later embeddings, retrieval results, citations, and caches will reference stable chunk IDs.
 - Add Redis only after the query API exists, so the project does not imply cache/state behavior before it is real.
 - Use deterministic local providers for tests and demos to avoid live AI dependencies in the core test suite.
 
 ## Known Limitations
 
-- Milestone 1 only stores raw files and document metadata.
-- Text extraction, chunking, embeddings, retrieval, query answering, SSE, and Redis-backed behavior are not implemented yet.
+- Text extraction supports only UTF-8 text and Markdown-like files.
+- Embeddings, retrieval, query answering, SSE, and Redis-backed behavior are not implemented yet.
 - Uploads are buffered through temporary local files before MinIO storage.
+- `force=true` chunk replacement deletes and recreates stored chunks for a document, but no chunk-version history exists yet.
+- Token counts are approximate whitespace counts.
 - If object storage succeeds and metadata persistence fails, the service attempts best-effort MinIO cleanup. Orphaned MinIO objects can still occur if that cleanup fails.
 - Production security, authentication, authorization, observability, and deployment hardening are not yet addressed.
 - Performance benchmarking and scale claims are intentionally out of scope until the system has realistic workloads and measurements.
