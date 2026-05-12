@@ -1,6 +1,6 @@
-# NexusAgent Interview Defense
+# NexusAgent Design Defense
 
-This document collects concise explanations for how to defend NexusAgent design choices in an interview. It should be updated after each milestone.
+This document collects concise explanations for NexusAgent design choices. It should be updated after each milestone.
 
 ## Project Summary
 
@@ -10,7 +10,7 @@ The project prioritizes explainable backend design over broad but shallow featur
 
 ## High-Level Talking Points
 
-- The backend starts as a single Spring Boot service to keep local development, testing, and interview explanation straightforward.
+- The backend starts as a single Spring Boot service to keep local development, testing, and operational reasoning straightforward.
 - MinIO stores raw uploaded files, PostgreSQL stores source-of-truth metadata and retrieval data, and Redis is reserved for short-lived state/cache.
 - Parent-child chunking separates retrieval precision from context quality.
 - Hybrid retrieval combines semantic vector search with keyword/full-text search.
@@ -60,7 +60,7 @@ Known limitations:
 
 - Text extraction is not implemented.
 - Parent-child chunking is not implemented.
-- Embeddings, retrieval, RRF, reranking, context construction, query answering, and SSE are not implemented.
+- At Milestone 1, embeddings, retrieval, RRF, reranking, context construction, query answering, and SSE were not implemented.
 - Redis is present in Docker Compose but not used by the application yet.
 - If MinIO storage succeeds but PostgreSQL persistence fails, an orphaned object may still remain if best-effort cleanup also fails.
 - There is no authentication, authorization, tenant isolation, malware scanning, or production observability yet.
@@ -116,7 +116,7 @@ Known limitations:
 - Only plain text and Markdown-like files are supported.
 - PDF and Word extraction are not implemented.
 - Token counts are approximate whitespace counts.
-- No embeddings, vector search, hybrid retrieval, reranking, query answering, Redis state/cache, or SSE exist yet.
+- At Milestone 2, embeddings, vector search, hybrid retrieval, reranking, query answering, Redis state/cache, and SSE were still out of scope.
 - Chunk sizes are character-based, not model-token-based.
 - Forced regeneration can invalidate future embeddings, citations, and caches, but invalidation is not needed until those features exist.
 
@@ -129,7 +129,54 @@ Production changes:
 
 ### Milestone 3: Embedding Pipeline + PgVector
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- `EmbeddingProvider` interface
+- `LocalDeterministicEmbeddingProvider` for local demos and tests
+- `SpringAiEmbeddingProvider` adapter boundary
+- `child_chunk_embeddings` table with `vector(384)`
+- Child chunk embedding service
+- PgVector persistence and exact cosine search repository
+- APIs to embed a document's child chunks and inspect embedding status
+- Tests for deterministic dimensions, child-only embedding, embedding persistence, API routes, and vector similarity search
+
+How to explain it:
+
+> I added the embedding stage after chunking. The service embeds only child chunks because they are the precise retrieval units. Parent chunks stay unembedded and are reserved for context expansion. Embeddings are stored in a separate `child_chunk_embeddings` table keyed by `child_chunk_id`, using PgVector with a fixed 384-dimensional local deterministic provider for repeatable tests and demos.
+
+Design defense:
+
+- `EmbeddingProvider` keeps provider choice behind a small boundary.
+- The default local provider is deterministic and requires no external API key, so tests are stable.
+- The Spring AI adapter boundary is optional and not enabled unless a real client bean is supplied.
+- Child chunks are embedded, not parent chunks, to keep future vector search precise.
+- Parent chunks remain available through `parent_chunk_id` for later context expansion.
+- Embeddings live in a separate table so vector/provider metadata is decoupled from chunk metadata.
+- `child_chunk_id` is the primary key, so one current embedding row exists per child chunk.
+
+Failure behavior:
+
+- Embedding a document with no child chunks returns a clear bad-request error.
+- Re-running embedding skips child chunks that already have embeddings.
+- If `force=true` chunking deletes child chunks, old embeddings are deleted by foreign-key cascade.
+- No external API key is required for local tests.
+
+Known limitations:
+
+- The deterministic local provider is not a semantic production model.
+- Embedding dimension is fixed at 384 in the schema.
+- There is no embedding job table, retry state, or failure reason history.
+- PgVector search exists only at repository level; no retrieval API, hybrid search, RRF, or reranking is implemented yet.
+- The HNSW index is created only when the PgVector build exposes the `hnsw` access method; exact scan remains the fallback.
+
+Production changes:
+
+- Add a real Spring AI `EmbeddingModel` client adapter.
+- Track embedding jobs, failures, retries, and provider/model versions.
+- Add explicit cache/vector invalidation events after forced re-chunking.
+- Tune vector indexes and distance operators based on real data volume and provider behavior.
 
 ### Milestone 4: Hybrid Retrieval + RRF
 
@@ -155,7 +202,7 @@ Status: Not implemented yet.
 
 Status: Not implemented yet.
 
-### Milestone 9: Hardening + Interview Polish
+### Milestone 9: Hardening + Documentation Polish
 
 Status: Not implemented yet.
 
@@ -166,7 +213,7 @@ Use specific, honest language:
 - "This is deterministic for local testing, not a production embedding model."
 - "Redis is used as a cache/state store, not the source of truth."
 - "This milestone defines the interface, but the Redis implementation arrives in Milestone 7."
-- "This design favors interview clarity and local reproducibility over distributed-system complexity."
+- "This design favors clarity and local reproducibility over distributed-system complexity."
 
 Avoid unsupported claims:
 

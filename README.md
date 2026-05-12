@@ -1,6 +1,6 @@
 # NexusAgent
 
-NexusAgent is an Enterprise Knowledge Assistant Backend built as an interview-defensible Java backend project.
+NexusAgent is an Enterprise Knowledge Assistant Backend built with Java, Spring WebFlux, PostgreSQL/PgVector, Redis, and MinIO.
 
 Implemented milestones:
 
@@ -13,8 +13,10 @@ Implemented milestones:
 - Text extraction for `text/plain`, `.txt`, Markdown content types, `.md`, and `.markdown`
 - Parent-child chunking with PostgreSQL persistence
 - APIs to extract/chunk a document and inspect stored chunks
+- Deterministic local child-chunk embeddings with PgVector persistence
+- APIs to embed child chunks and inspect embedding status
 
-The project still does not implement embeddings, retrieval, query answering, SSE, or Redis-backed state/cache behavior.
+The project still does not implement hybrid retrieval, RRF, reranking, query answering, SSE, or Redis-backed state/cache behavior.
 
 ## Tech Stack
 
@@ -58,10 +60,10 @@ PostgreSQL host: localhost
 PostgreSQL host port: 5432
 PostgreSQL container port: 5432
 PostgreSQL database: nexusagent
-PostgreSQL user/password: nexus/nexus
+PostgreSQL user/password: nexus/nexus-local-password
 MinIO API: http://localhost:9000
 MinIO console: http://localhost:9001
-MinIO user/password: minioadmin/minioadmin123
+MinIO user/password: minioadmin/minio-local-password
 Bucket: nexus-documents
 Redis: localhost:6379
 Application upload max: 25 MiB
@@ -71,7 +73,11 @@ Multipart max parts: 4
 Parent chunk max chars: 1200
 Child chunk max chars: 400
 Child chunk overlap chars: 80
+Embedding provider: local
+Embedding dimension: 384
 ```
+
+These credentials are local-development placeholders from `.env.example`; replace them in your private `.env` for any non-local environment.
 
 ## Start Local Dependencies
 
@@ -111,7 +117,7 @@ The app starts on:
 http://localhost:8080
 ```
 
-Flyway runs automatically at startup and creates the `documents` table.
+Flyway runs automatically at startup and creates the document, chunk, and embedding tables.
 
 Flyway uses:
 
@@ -230,6 +236,33 @@ Example chunk response shape:
 }
 ```
 
+Generate embeddings for child chunks:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/documents/{document-id}/embed
+```
+
+Check embedding status:
+
+```bash
+curl http://localhost:8080/api/v1/documents/{document-id}/embedding-status
+```
+
+Example embedding status response:
+
+```json
+{
+  "documentId": "7bfc50c2-81f9-49df-872f-f401f8fbff20",
+  "childChunkCount": 2,
+  "embeddedChildChunkCount": 2,
+  "missingChildChunkCount": 0,
+  "complete": true,
+  "provider": "local",
+  "modelName": "local-deterministic-hash-384",
+  "dimension": 384
+}
+```
+
 ## Run Tests
 
 ```bash
@@ -245,8 +278,12 @@ The test suite includes:
 - Chunking idempotency and force-regeneration unit tests
 - Document chunking status update unit tests
 - Empty extracted text validation test
+- Deterministic embedding provider unit tests
+- Child chunk embedding service unit tests
+- Embedding API route tests
 - PostgreSQL metadata persistence integration test
 - Parent-child chunk persistence integration test
+- PgVector embedding persistence and vector search integration tests
 
 The persistence integration tests use Testcontainers with the `pgvector/pgvector:pg16` image. If Docker is not available to Testcontainers, those tests are skipped.
 
@@ -261,7 +298,7 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=55432
 POSTGRES_DB=nexusagent
 POSTGRES_USER=nexus
-POSTGRES_PASSWORD=nexus
+POSTGRES_PASSWORD=nexus-local-password
 ```
 
 Then recreate the Compose service:
@@ -334,7 +371,7 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_DB=nexusagent
 POSTGRES_USER=nexus
-POSTGRES_PASSWORD=nexus
+POSTGRES_PASSWORD=nexus-local-password
 ```
 
 ## Milestone 1 Design
@@ -351,7 +388,7 @@ Client multipart upload
   -> API response
 ```
 
-MinIO stores the raw file. PostgreSQL stores source-of-truth metadata and chunks. Redis is available in Docker Compose for later milestones but is not used through Milestone 2.
+MinIO stores the raw file. PostgreSQL stores source-of-truth metadata, chunks, and child chunk embeddings. Redis is available in Docker Compose for later milestones but is not used through Milestone 3.
 
 Flyway uses the JDBC PostgreSQL driver because Flyway is a blocking schema migration tool. Runtime metadata persistence uses R2DBC through Spring's reactive `DatabaseClient`.
 
@@ -425,16 +462,41 @@ Supported extraction inputs:
 
 Unsupported formats such as PDF and Word return a clear validation error for now.
 
+## Milestone 3 Design
+
+Milestone 3 adds child-chunk embeddings and PgVector storage.
+
+Embedding flow:
+
+```text
+POST /api/v1/documents/{id}/embed
+  -> look up document metadata in PostgreSQL
+  -> load parent/child chunks from PostgreSQL
+  -> reject documents that have not been chunked
+  -> skip child chunks that already have embeddings
+  -> embed only missing child chunks
+  -> store vectors in child_chunk_embeddings
+  -> return embedding status
+```
+
+Only child chunks are embedded. Parent chunks stay as context-expansion records and are not embedded in this MVP.
+
+The default provider is `LocalDeterministicEmbeddingProvider`, which produces deterministic 384-dimensional hash-based vectors for local demos and tests. It is not a semantic production model. A `SpringAiEmbeddingProvider` boundary exists, but no Spring AI client is enabled by default and no external API key is required.
+
+`child_chunk_embeddings` stores one row per embedded child chunk, keyed by `child_chunk_id`. If a document is force re-chunked, old child rows are deleted and their embeddings are removed through foreign-key cascade. PgVector exact similarity search is available through the repository layer for Milestone 4. The migration attempts to create an HNSW cosine index only when the local PgVector build exposes the `hnsw` access method; exact scan remains the fallback.
+
 ## Known Limitations
 
 - Text extraction only supports UTF-8 plain text and Markdown-like files.
 - PDF and Word extraction are not implemented yet.
-- No embeddings or PgVector vector search yet.
-- No retrieval, RRF, reranking, context construction, query answering, or SSE yet.
+- The local deterministic embedding provider is useful for tests and demos, but it is not a real semantic embedding model.
+- No hybrid retrieval, RRF, reranking, context construction, query answering, or SSE yet.
 - Redis is only started by Docker Compose; the application does not use it yet.
 - Uploads are written to a temporary local file before MinIO storage.
 - `force=true` replacement deletes and recreates chunks for a document, but there is no chunk-version history or audit trail yet.
+- Re-chunking invalidates old embeddings through cascade delete, but there is no explicit embedding job history or invalidation event yet.
 - Token counts are approximate whitespace counts, not model-token counts.
+- Embedding dimension is fixed at 384 for the current schema; changing dimensions requires a migration.
 - If MinIO upload succeeds but PostgreSQL persistence fails, Milestone 1 attempts best-effort MinIO cleanup. An orphaned object can still remain if cleanup also fails.
 - There is no authentication, tenant isolation, malware scanning, file type policy, or production observability yet.
 - Docker images are intended for local development, not production deployment.
@@ -443,7 +505,8 @@ Unsupported formats such as PDF and Word return a clear validation error for now
 
 - Add an outbox/reconciliation flow for partial upload failures that remain after best-effort cleanup.
 - Add document status transitions for extraction and ingestion.
-- Add PgVector embedding storage in Milestone 3.
 - Add PDF and Word extractors behind the `DocumentTextExtractor` interface.
 - Add model-aware token counting.
+- Add a real Spring AI `EmbeddingModel` adapter implementation.
+- Add hybrid retrieval and RRF in Milestone 4.
 - Add authentication and tenant-aware access control in a later hardening milestone.

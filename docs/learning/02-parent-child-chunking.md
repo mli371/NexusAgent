@@ -252,9 +252,9 @@ Run tests:
 mvn test
 ```
 
-## Interview Defense
+## Design Defense
 
-In an interview, explain Milestone 2 like this:
+Use this concise explanation for Milestone 2:
 
 > I added the ingestion stage that turns stored raw text files into retrieval-ready chunks. The extractor boundary supports text and Markdown now, and it can be extended for PDF or Word later. The chunking strategy creates larger parent chunks for context expansion and smaller overlapping child chunks for precise retrieval. I persisted both levels in PostgreSQL with explicit parent-child relationships, but I did not implement embeddings or retrieval yet.
 
@@ -272,7 +272,7 @@ Key points to defend:
 
 - Only UTF-8 text and Markdown-like files are supported.
 - PDF and Word extraction are not implemented.
-- No embeddings are created.
+- Milestone 2 itself does not create embeddings.
 - No vector search or keyword retrieval is implemented.
 - No RRF, reranking, context construction, query API, SSE, Redis state/cache, or agent workflow is implemented.
 - Token counts are approximate whitespace counts.
@@ -286,5 +286,5 @@ Key points to defend:
 - Add extraction status fields and failure reasons.
 - Add model-aware token counting.
 - Add chunk versioning or an ingestion-job table for richer production auditability.
-- Add embedding generation for child chunks in Milestone 3.
+- Use Milestone 3 child chunk embeddings as the semantic retrieval input.
 - Add retrieval over child chunks and parent context expansion in later milestones.

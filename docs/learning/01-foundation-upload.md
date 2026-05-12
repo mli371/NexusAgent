@@ -187,13 +187,13 @@ The application file limit is 25 MiB. The multipart disk limit is 30 MiB so the 
 
 Milestone 2 should add text extraction and parent-child chunk persistence. The `documents` table can keep representing the source document, while new chunk tables represent extracted content.
 
-Milestone 3 should add embeddings for child chunks and store them with PgVector.
+Milestone 3 adds embeddings for child chunks and stores them with PgVector.
 
 Later milestones can add retrieval, reranking, context construction, SSE query flow, and Redis-backed cache/state.
 
-## Interview Defense
+## Design Defense
 
-In an interview, explain Milestone 1 like this:
+Use this concise explanation for Milestone 1:
 
 > I started by separating raw file storage from metadata. MinIO owns the bytes, PostgreSQL owns the source-of-truth record. The upload API stores the file first, then writes metadata with the MinIO bucket and object key. I kept extraction, chunking, embeddings, and retrieval out of this milestone so the API does not imply capabilities that are not implemented yet.
 

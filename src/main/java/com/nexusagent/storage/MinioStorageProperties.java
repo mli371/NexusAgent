@@ -9,7 +9,7 @@ public class MinioStorageProperties {
 
     private String endpoint = "http://localhost:9000";
     private String accessKey = "minioadmin";
-    private String secretKey = "minioadmin123";
+    private String secretKey = "minio-local-password";
     private String bucket = "nexus-documents";
     private Duration operationTimeout = Duration.ofSeconds(10);
 

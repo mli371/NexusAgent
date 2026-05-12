@@ -3,5 +3,12 @@ target/
 .idea/
 .vscode/
 .env
+.env.*
+!.env.example
 *.log
 *.iml
+*.pem
+*.key
+*.p12
+*.jks
+secrets/

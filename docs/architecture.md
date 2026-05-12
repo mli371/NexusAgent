@@ -6,11 +6,11 @@ This document will evolve milestone by milestone. It records the architecture th
 
 NexusAgent is an Enterprise Knowledge Assistant Backend. It ingests enterprise documents, stores raw files and metadata, chunks text for retrieval, embeds child chunks, retrieves relevant context through hybrid search, and serves query responses with citations.
 
-The system is designed as an interview-defensible backend project: clear boundaries, practical trade-offs, runnable local dependencies, and no hidden fake features.
+The system is designed as a maintainable backend project with clear boundaries, practical trade-offs, runnable local dependencies, and explicit limitations.
 
 ## Current Architecture
 
-Milestones 1 and 2 are implemented.
+Milestones 1, 2, and 3 are implemented.
 
 ```text
 Client
@@ -37,7 +37,7 @@ GET /api/v1/documents
 GET /api/v1/health
 ```
 
-Redis is available in Docker Compose but is not used by the application through Milestone 2.
+Redis is available in Docker Compose but is not used by the application through Milestone 3.
 
 Milestone 2 adds text extraction and parent-child chunking:
 
@@ -65,6 +65,33 @@ Chunk inspection API:
 ```text
 GET /api/v1/documents/{id}/chunks
 ```
+
+Milestone 3 adds child-chunk embeddings:
+
+```text
+POST /api/v1/documents/{id}/embed
+  |
+  v
+ChildChunkEmbeddingService
+  |
+  +-- DocumentRepository -> verify document exists
+  +-- ChunkRepository -> load parent/child chunks
+  +-- ChildChunkEmbeddingRepository -> find already embedded child chunks
+  +-- EmbeddingService
+  |     +-- EmbeddingProvider interface
+  |     +-- LocalDeterministicEmbeddingProvider by default
+  |     +-- SpringAiEmbeddingProvider adapter boundary
+  |
+  +-- ChildChunkEmbeddingRepository -> PgVector child_chunk_embeddings
+```
+
+Embedding status API:
+
+```text
+GET /api/v1/documents/{id}/embedding-status
+```
+
+The repository layer also contains exact PgVector cosine search for child chunk embeddings. It is intentionally not exposed as a retrieval API yet; hybrid retrieval starts in Milestone 4.
 
 ## Target Architecture
 
@@ -107,7 +134,7 @@ Spring Boot WebFlux API
 - PostgreSQL stores source-of-truth document metadata and chunk metadata.
 - `parent_chunks` stores larger context blocks.
 - `child_chunks` stores smaller windows with `parent_chunk_id` relationships.
-- PgVector is enabled by Flyway in Milestone 1 for later vector embedding storage.
+- `child_chunk_embeddings` stores PgVector embeddings for child chunks only.
 - Redis stores short-lived session state, retrieval cache entries, and intermediate tool outputs after Milestone 7.
 
 Redis is not the source of truth.
@@ -154,15 +181,19 @@ com.nexusagent
 - Add `DocumentTextExtractor` as an extension point for PDF and Word later, while implementing only text and Markdown now.
 - Store child chunks separately from parent chunks to make the future embedding table naturally point at child chunks.
 - Keep chunking idempotent by default because later embeddings, retrieval results, citations, and caches will reference stable chunk IDs.
+- Embed child chunks only so vector search remains focused; parent chunks are reserved for context expansion.
+- Store embeddings in a separate table so provider/model metadata and vectors do not bloat the chunk metadata table.
 - Add Redis only after the query API exists, so the project does not imply cache/state behavior before it is real.
 - Use deterministic local providers for tests and demos to avoid live AI dependencies in the core test suite.
 
 ## Known Limitations
 
 - Text extraction supports only UTF-8 text and Markdown-like files.
-- Embeddings, retrieval, query answering, SSE, and Redis-backed behavior are not implemented yet.
+- The local deterministic embedding provider is not a production semantic model.
+- Hybrid retrieval, query answering, SSE, and Redis-backed behavior are not implemented yet.
 - Uploads are buffered through temporary local files before MinIO storage.
 - `force=true` chunk replacement deletes and recreates stored chunks for a document, but no chunk-version history exists yet.
+- Forced re-chunking cascades old embeddings through child chunk foreign keys, but there is no embedding job history yet.
 - Token counts are approximate whitespace counts.
 - If object storage succeeds and metadata persistence fails, the service attempts best-effort MinIO cleanup. Orphaned MinIO objects can still occur if that cleanup fails.
 - Production security, authentication, authorization, observability, and deployment hardening are not yet addressed.

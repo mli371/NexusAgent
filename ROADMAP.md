@@ -47,6 +47,8 @@ Expected scope:
 
 ## Milestone 3: Embedding Pipeline + PgVector
 
+Status: Implemented.
+
 Embed child chunks and store vectors in PostgreSQL using PgVector. Provide a deterministic local embedding provider for tests and local demos, plus an adapter boundary for Spring AI.
 
 Expected scope:
@@ -134,9 +136,9 @@ Out of scope:
 - Multi-agent platform abstractions
 - Autonomous background agents
 
-## Milestone 9: Hardening + Interview Polish
+## Milestone 9: Hardening + Documentation Polish
 
-Improve reliability, documentation, local demo quality, and interview readiness.
+Improve reliability, documentation, local demo quality, and project readiness.
 
 Expected scope:
 
@@ -160,7 +162,7 @@ Out of scope:
 2. Tests added
 3. `README.md` or docs updated
 4. `docs/learning/<milestone>.md` created
-5. Interview defense section added
+5. Design defense section added
 6. Known limitations documented
 7. Commands provided to run tests and demo
 8. No fake or undocumented stubs
