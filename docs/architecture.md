@@ -10,7 +10,7 @@ The system is designed as a maintainable backend project with clear boundaries, 
 
 ## Current Architecture
 
-Milestones 1, 2, and 3 are implemented.
+Milestones 1, 2, 3, and 4 are implemented.
 
 ```text
 Client
@@ -37,7 +37,7 @@ GET /api/v1/documents
 GET /api/v1/health
 ```
 
-Redis is available in Docker Compose but is not used by the application through Milestone 3.
+Redis is available in Docker Compose but is not used by the application through Milestone 4.
 
 Milestone 2 adds text extraction and parent-child chunking:
 
@@ -91,7 +91,31 @@ Embedding status API:
 GET /api/v1/documents/{id}/embedding-status
 ```
 
-The repository layer also contains exact PgVector cosine search for child chunk embeddings. It is intentionally not exposed as a retrieval API yet; hybrid retrieval starts in Milestone 4.
+Milestone 4 adds hybrid retrieval:
+
+```text
+POST /api/v1/retrieval/debug
+  |
+  v
+RetrievalDebugController
+  |
+  v
+HybridRetrievalService
+  |
+  +-- SemanticRetrievalService
+  |     +-- EmbeddingService -> query embedding
+  |     +-- VectorSearchRepository -> PgVector search over child_chunk_embeddings
+  |
+  +-- FullTextRetrievalService
+  |     +-- FullTextSearchRepository -> PostgreSQL full-text search over child_chunks.text
+  |
+  +-- RrfFusionService
+        +-- deduplicate by child_chunk_id
+        +-- fuse vector and full-text rank positions
+        +-- preserve debug metadata for each candidate
+```
+
+This is a retrieval debug API, not a query-answering API. It returns ranked candidates and fusion details so the retrieval stage can be inspected before Milestone 5 adds reranking and context construction.
 
 ## Target Architecture
 
@@ -115,9 +139,9 @@ Spring Boot WebFlux API
   |     +-- PgVector storage
   |
   +-- Retrieval pipeline
-  |     +-- Vector search
-  |     +-- PostgreSQL full-text search
-  |     +-- RRF fusion
+  |     +-- Vector search: implemented in Milestone 4
+  |     +-- PostgreSQL full-text search: implemented in Milestone 4
+  |     +-- RRF fusion: implemented in Milestone 4
   |     +-- Reranking
   |     +-- Context construction with citations
   |
@@ -135,6 +159,7 @@ Spring Boot WebFlux API
 - `parent_chunks` stores larger context blocks.
 - `child_chunks` stores smaller windows with `parent_chunk_id` relationships.
 - `child_chunk_embeddings` stores PgVector embeddings for child chunks only.
+- PostgreSQL full-text search indexes `child_chunks.text` for keyword retrieval.
 - Redis stores short-lived session state, retrieval cache entries, and intermediate tool outputs after Milestone 7.
 
 Redis is not the source of truth.
@@ -183,6 +208,8 @@ com.nexusagent
 - Keep chunking idempotent by default because later embeddings, retrieval results, citations, and caches will reference stable chunk IDs.
 - Embed child chunks only so vector search remains focused; parent chunks are reserved for context expansion.
 - Store embeddings in a separate table so provider/model metadata and vectors do not bloat the chunk metadata table.
+- Use RRF for hybrid retrieval because vector distances and full-text ranks are not directly comparable.
+- Preserve vector rank, vector distance, full-text rank, full-text score, and RRF score in the debug API so retrieval behavior is inspectable.
 - Add Redis only after the query API exists, so the project does not imply cache/state behavior before it is real.
 - Use deterministic local providers for tests and demos to avoid live AI dependencies in the core test suite.
 
@@ -190,7 +217,8 @@ com.nexusagent
 
 - Text extraction supports only UTF-8 text and Markdown-like files.
 - The local deterministic embedding provider is not a production semantic model.
-- Hybrid retrieval, query answering, SSE, and Redis-backed behavior are not implemented yet.
+- Hybrid retrieval is implemented only as a debug API; reranking, context construction, query answering, SSE, and Redis-backed behavior are not implemented yet.
+- Full-text search currently uses PostgreSQL's English text search configuration.
 - Uploads are buffered through temporary local files before MinIO storage.
 - `force=true` chunk replacement deletes and recreates stored chunks for a document, but no chunk-version history exists yet.
 - Forced re-chunking cascades old embeddings through child chunk foreign keys, but there is no embedding job history yet.

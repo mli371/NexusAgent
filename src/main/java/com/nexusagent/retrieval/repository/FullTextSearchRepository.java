@@ -1,33 +1,29 @@
-package com.nexusagent.embeddings.repository;
+package com.nexusagent.retrieval.repository;
 
-import com.nexusagent.embeddings.domain.EmbeddingVector;
-import com.nexusagent.embeddings.domain.VectorSearchResult;
-import io.r2dbc.spi.Row;
-import io.r2dbc.spi.RowMetadata;
 import java.util.List;
 import java.util.UUID;
+
+import com.nexusagent.retrieval.domain.FullTextSearchResult;
+import io.r2dbc.spi.Row;
+import io.r2dbc.spi.RowMetadata;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Flux;
 
 @Repository
-public class VectorSearchRepository {
+public class FullTextSearchRepository {
 
     private final DatabaseClient databaseClient;
 
-    public VectorSearchRepository(DatabaseClient databaseClient) {
+    public FullTextSearchRepository(DatabaseClient databaseClient) {
         this.databaseClient = databaseClient;
     }
 
-    public Flux<VectorSearchResult> search(EmbeddingVector queryEmbedding, int limit) {
-        return search(queryEmbedding, List.of(), limit);
-    }
-
-    public Flux<VectorSearchResult> search(EmbeddingVector queryEmbedding, List<UUID> documentIds, int limit) {
+    public Flux<FullTextSearchResult> search(String query, List<UUID> documentIds, int limit) {
         String documentFilter = documentFilter(documentIds);
         String sql = """
-                        WITH query_embedding AS (
-                            SELECT CAST(:queryEmbedding AS vector) AS embedding
+                        WITH query_text AS (
+                            SELECT websearch_to_tsquery('english', :query) AS query
                         )
                         SELECT
                             c.id AS child_chunk_id,
@@ -38,17 +34,17 @@ public class VectorSearchRepository {
                                 WHEN length(c.text) > 160 THEN substring(c.text from 1 for 160) || '...'
                                 ELSE c.text
                             END AS preview_text,
-                            e.embedding <=> query_embedding.embedding AS distance
-                        FROM child_chunk_embeddings e
-                        JOIN child_chunks c ON c.id = e.child_chunk_id
-                        CROSS JOIN query_embedding
+                            ts_rank_cd(to_tsvector('english', c.text), query_text.query) AS score
+                        FROM child_chunks c
+                        CROSS JOIN query_text
+                        WHERE to_tsvector('english', c.text) @@ query_text.query
                         %s
-                        ORDER BY e.embedding <=> query_embedding.embedding
+                        ORDER BY score DESC, c.chunk_index ASC
                         LIMIT :limit
                         """.formatted(documentFilter);
 
         DatabaseClient.GenericExecuteSpec spec = databaseClient.sql(sql)
-                .bind("queryEmbedding", queryEmbedding.toPgVectorLiteral())
+                .bind("query", query)
                 .bind("limit", limit);
         spec = bindDocumentIds(spec, documentIds);
         return spec
@@ -61,7 +57,7 @@ public class VectorSearchRepository {
             return "";
         }
 
-        StringBuilder builder = new StringBuilder("WHERE c.document_id IN (");
+        StringBuilder builder = new StringBuilder("AND c.document_id IN (");
         for (int index = 0; index < documentIds.size(); index++) {
             if (index > 0) {
                 builder.append(", ");
@@ -87,14 +83,14 @@ public class VectorSearchRepository {
         return current;
     }
 
-    private VectorSearchResult mapResult(Row row, RowMetadata rowMetadata) {
-        return new VectorSearchResult(
+    private FullTextSearchResult mapResult(Row row, RowMetadata rowMetadata) {
+        return new FullTextSearchResult(
                 row.get("child_chunk_id", UUID.class),
                 row.get("document_id", UUID.class),
                 row.get("parent_chunk_id", UUID.class),
                 requireInteger(row, "chunk_index"),
                 row.get("preview_text", String.class),
-                requireDouble(row, "distance")
+                requireDouble(row, "score")
         );
     }
 

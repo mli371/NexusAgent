@@ -15,8 +15,10 @@ Implemented milestones:
 - APIs to extract/chunk a document and inspect stored chunks
 - Deterministic local child-chunk embeddings with PgVector persistence
 - APIs to embed child chunks and inspect embedding status
+- Hybrid retrieval debug API that combines PgVector semantic search and PostgreSQL full-text search
+- Reciprocal Rank Fusion (RRF) over vector and full-text candidate rankings
 
-The project still does not implement hybrid retrieval, RRF, reranking, query answering, SSE, or Redis-backed state/cache behavior.
+The project still does not implement reranking, context construction, query answering, SSE, or Redis-backed state/cache behavior.
 
 ## Tech Stack
 
@@ -75,6 +77,9 @@ Child chunk max chars: 400
 Child chunk overlap chars: 80
 Embedding provider: local
 Embedding dimension: 384
+Retrieval default topK: 10
+Retrieval max topK: 50
+RRF k: 60
 ```
 
 These credentials are local-development placeholders from `.env.example`; replace them in your private `.env` for any non-local environment.
@@ -263,6 +268,71 @@ Example embedding status response:
 }
 ```
 
+Run hybrid retrieval debug after a document has been uploaded, chunked, and embedded:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/retrieval/debug \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "security policy",
+    "documentIds": ["{document-id}"],
+    "topK": 5
+  }'
+```
+
+Example retrieval debug response shape:
+
+```json
+{
+  "query": "security policy",
+  "vectorCandidates": [
+    {
+      "childChunkId": "child uuid",
+      "parentChunkId": "parent uuid",
+      "documentId": "document uuid",
+      "chunkIndex": 0,
+      "previewText": "security policy access controls",
+      "source": "vector",
+      "vectorRank": 1,
+      "vectorDistance": 0.12,
+      "fullTextRank": null,
+      "fullTextScore": null,
+      "rrfScore": null
+    }
+  ],
+  "fullTextCandidates": [
+    {
+      "childChunkId": "child uuid",
+      "parentChunkId": "parent uuid",
+      "documentId": "document uuid",
+      "chunkIndex": 0,
+      "previewText": "security policy access controls",
+      "source": "full_text",
+      "vectorRank": null,
+      "vectorDistance": null,
+      "fullTextRank": 1,
+      "fullTextScore": 0.83,
+      "rrfScore": null
+    }
+  ],
+  "fusedCandidates": [
+    {
+      "childChunkId": "child uuid",
+      "parentChunkId": "parent uuid",
+      "documentId": "document uuid",
+      "chunkIndex": 0,
+      "previewText": "security policy access controls",
+      "source": "both",
+      "vectorRank": 1,
+      "vectorDistance": 0.12,
+      "fullTextRank": 1,
+      "fullTextScore": 0.83,
+      "rrfScore": 0.03278688524590164
+    }
+  ]
+}
+```
+
 ## Run Tests
 
 ```bash
@@ -281,9 +351,15 @@ The test suite includes:
 - Deterministic embedding provider unit tests
 - Child chunk embedding service unit tests
 - Embedding API route tests
+- Semantic retrieval service unit tests
+- Full-text retrieval service unit tests
+- RRF formula, deduplication, and source-tracking unit tests
+- Hybrid retrieval orchestration unit tests
+- Retrieval debug API route tests
 - PostgreSQL metadata persistence integration test
 - Parent-child chunk persistence integration test
 - PgVector embedding persistence and vector search integration tests
+- PostgreSQL full-text and vector retrieval integration tests
 
 The persistence integration tests use Testcontainers with the `pgvector/pgvector:pg16` image. If Docker is not available to Testcontainers, those tests are skipped.
 
@@ -388,7 +464,7 @@ Client multipart upload
   -> API response
 ```
 
-MinIO stores the raw file. PostgreSQL stores source-of-truth metadata, chunks, and child chunk embeddings. Redis is available in Docker Compose for later milestones but is not used through Milestone 3.
+MinIO stores the raw file. PostgreSQL stores source-of-truth metadata, chunks, and child chunk embeddings. Redis is available in Docker Compose for later milestones but is not used through Milestone 4.
 
 Flyway uses the JDBC PostgreSQL driver because Flyway is a blocking schema migration tool. Runtime metadata persistence uses R2DBC through Spring's reactive `DatabaseClient`.
 
@@ -483,14 +559,42 @@ Only child chunks are embedded. Parent chunks stay as context-expansion records 
 
 The default provider is `LocalDeterministicEmbeddingProvider`, which produces deterministic 384-dimensional hash-based vectors for local demos and tests. It is not a semantic production model. A `SpringAiEmbeddingProvider` boundary exists, but no Spring AI client is enabled by default and no external API key is required.
 
-`child_chunk_embeddings` stores one row per embedded child chunk, keyed by `child_chunk_id`. If a document is force re-chunked, old child rows are deleted and their embeddings are removed through foreign-key cascade. PgVector exact similarity search is available through the repository layer for Milestone 4. The migration attempts to create an HNSW cosine index only when the local PgVector build exposes the `hnsw` access method; exact scan remains the fallback.
+`child_chunk_embeddings` stores one row per embedded child chunk, keyed by `child_chunk_id`. If a document is force re-chunked, old child rows are deleted and their embeddings are removed through foreign-key cascade. PgVector exact similarity search is used by Milestone 4 semantic retrieval. The migration attempts to create an HNSW cosine index only when the local PgVector build exposes the `hnsw` access method; exact scan remains the fallback.
+
+## Milestone 4 Design
+
+Milestone 4 adds hybrid retrieval and RRF.
+
+Retrieval flow:
+
+```text
+POST /api/v1/retrieval/debug
+  -> validate query and topK
+  -> SemanticRetrievalService embeds the query and runs PgVector search over child_chunk_embeddings
+  -> FullTextRetrievalService runs PostgreSQL full-text search over child_chunks.text
+  -> RrfFusionService deduplicates by child_chunk_id and fuses rank positions
+  -> API returns vector candidates, full-text candidates, and fused candidates with debug fields
+```
+
+Semantic retrieval and full-text retrieval produce separate ranked lists. The implementation does not compare raw vector distance to raw full-text score because those numbers have different meanings. RRF uses only each candidate's rank position:
+
+```text
+score = sum(1 / (k + rank_i))
+```
+
+The default `k` is 60. Candidates that appear in both lists usually receive a stronger fused score because they contribute rank evidence from both retrieval paths.
+
+`child_chunk_id` is the deduplication key. `parent_chunk_id`, `document_id`, `chunk_index`, and preview text are preserved so the next milestone can expand precise child hits into parent context and citations.
 
 ## Known Limitations
 
 - Text extraction only supports UTF-8 plain text and Markdown-like files.
 - PDF and Word extraction are not implemented yet.
 - The local deterministic embedding provider is useful for tests and demos, but it is not a real semantic embedding model.
-- No hybrid retrieval, RRF, reranking, context construction, query answering, or SSE yet.
+- Hybrid retrieval is implemented only as a debug API. It does not construct answer context or generate responses.
+- No reranking, context construction, query answering, or SSE yet.
+- PostgreSQL full-text search uses the English text search configuration for now.
+- RRF fuses rank positions only; it does not calibrate vector distances against full-text scores.
 - Redis is only started by Docker Compose; the application does not use it yet.
 - Uploads are written to a temporary local file before MinIO storage.
 - `force=true` replacement deletes and recreates chunks for a document, but there is no chunk-version history or audit trail yet.
@@ -508,5 +612,6 @@ The default provider is `LocalDeterministicEmbeddingProvider`, which produces de
 - Add PDF and Word extractors behind the `DocumentTextExtractor` interface.
 - Add model-aware token counting.
 - Add a real Spring AI `EmbeddingModel` adapter implementation.
-- Add hybrid retrieval and RRF in Milestone 4.
+- Add reranking and context construction in Milestone 5.
+- Add language-aware full-text configuration and query preprocessing.
 - Add authentication and tenant-aware access control in a later hardening milestone.

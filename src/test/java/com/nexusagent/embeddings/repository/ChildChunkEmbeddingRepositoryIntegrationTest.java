@@ -105,7 +105,7 @@ class ChildChunkEmbeddingRepositoryIntegrationTest {
                         .collectList())
                 .assertNext(results -> {
                     assertThat(results).hasSize(2);
-                    assertThat(results.get(0).text()).contains("security policy");
+                    assertThat(results.get(0).previewText()).contains("security policy");
                     assertThat(results.get(0).distance()).isLessThanOrEqualTo(results.get(1).distance());
                 })
                 .verifyComplete();

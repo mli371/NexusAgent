@@ -180,7 +180,53 @@ Production changes:
 
 ### Milestone 4: Hybrid Retrieval + RRF
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- PgVector semantic retrieval over embedded child chunks
+- PostgreSQL full-text retrieval over `child_chunks.text`
+- Candidate models for vector, full-text, and fused results
+- RRF fusion with default `k=60`
+- Deduplication by `child_chunk_id`
+- Retrieval debug API at `POST /api/v1/retrieval/debug`
+- Tests for vector retrieval, full-text retrieval, RRF scoring, deduplication, source tracking, and API routing
+
+How to explain it:
+
+> I added a hybrid retrieval stage that runs two independent searches over child chunks: semantic vector search for meaning-based matches and PostgreSQL full-text search for keyword matches. Those result lists are not scored on the same scale, so I do not compare raw distances to raw keyword scores. Instead, I fuse the ranked lists with Reciprocal Rank Fusion and preserve debug metadata so retrieval behavior can be inspected.
+
+Design defense:
+
+- Semantic retrieval uses the query embedding and PgVector cosine distance against `child_chunk_embeddings`.
+- Full-text retrieval uses PostgreSQL `websearch_to_tsquery` and `ts_rank_cd` over child chunk text.
+- RRF uses rank positions only: `sum(1 / (k + rank))`.
+- `child_chunk_id` is the deduplication key because embeddings, retrieval hits, citations, and cache entries all attach to child chunks.
+- Source tracking reports `vector`, `full_text`, or `both`, which makes the debug API useful when tuning retrieval behavior.
+- `parent_chunk_id` is preserved for the next milestone, where precise child hits will expand into parent context.
+
+Failure behavior:
+
+- Blank queries return a bad-request error.
+- `topK` must be positive and is capped by configuration.
+- Missing embeddings simply mean semantic retrieval has fewer or no candidates.
+- Missing keyword matches simply mean full-text retrieval has fewer or no candidates.
+- The debug API returns candidate lists; it does not pretend to answer questions.
+
+Known limitations:
+
+- Retrieval is exposed only through a debug endpoint.
+- There is no reranking, context construction, answer generation, SSE, or Redis cache yet.
+- The local deterministic embedding provider is not a production semantic model.
+- PostgreSQL full-text search uses the English configuration for now.
+- RRF does not calibrate raw scores; it intentionally fuses rank positions only.
+
+Production changes:
+
+- Add query preprocessing and language-aware full-text configuration.
+- Add reranking and context construction before answer generation.
+- Track retrieval metrics, latency, candidate counts, and no-result cases.
+- Tune PgVector and full-text indexes with realistic document volume.
 
 ### Milestone 5: Reranking + Context Construction
 

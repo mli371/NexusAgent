@@ -1,13 +1,13 @@
-package com.nexusagent.embeddings.domain;
+package com.nexusagent.retrieval.domain;
 
 import java.util.UUID;
 
-public record VectorSearchResult(
+public record FullTextSearchResult(
         UUID childChunkId,
         UUID documentId,
         UUID parentChunkId,
         int chunkIndex,
         String previewText,
-        double distance
+        double score
 ) {
 }

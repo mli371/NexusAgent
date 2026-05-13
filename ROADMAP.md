@@ -62,6 +62,8 @@ Expected scope:
 
 ## Milestone 4: Hybrid Retrieval + RRF
 
+Status: Implemented.
+
 Implement semantic vector retrieval and PostgreSQL full-text keyword retrieval, then fuse candidate rankings with Reciprocal Rank Fusion.
 
 Expected scope:
@@ -70,6 +72,7 @@ Expected scope:
 - Keyword/full-text search service
 - Candidate model
 - RRF fusion service
+- Retrieval debug API
 - Tests for ranking and fusion behavior
 
 ## Milestone 5: Reranking + Context Construction
