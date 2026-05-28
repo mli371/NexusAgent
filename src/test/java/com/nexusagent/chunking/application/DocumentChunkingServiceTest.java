@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -21,10 +22,14 @@ import com.nexusagent.chunking.domain.ExtractedDocumentText;
 import com.nexusagent.chunking.domain.ParentChildChunkPlan;
 import com.nexusagent.chunking.domain.ParentChunk;
 import com.nexusagent.chunking.repository.ChunkRepository;
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentStatus;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.documents.repository.DocumentRepository;
+import com.nexusagent.enterprise.audit.AuditService;
+import com.nexusagent.enterprise.ingestion.IngestionJobService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
@@ -38,6 +43,8 @@ class DocumentChunkingServiceTest {
     private DocumentRepository documentRepository;
     private DocumentTextExtractionService extractionService;
     private ChunkRepository chunkRepository;
+    private IngestionJobService ingestionJobService;
+    private AuditService auditService;
     private DocumentChunkingService service;
 
     @BeforeEach
@@ -45,6 +52,12 @@ class DocumentChunkingServiceTest {
         documentRepository = mock(DocumentRepository.class);
         extractionService = mock(DocumentTextExtractionService.class);
         chunkRepository = mock(ChunkRepository.class);
+        ingestionJobService = mock(IngestionJobService.class);
+        auditService = mock(AuditService.class);
+        lenient().when(ingestionJobService.run(any(), any(), any(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(3));
+        lenient().when(auditService.record(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Mono.empty());
         ChunkingProperties properties = new ChunkingProperties();
         properties.setParentMaxChars(120);
         properties.setChildMaxChars(50);
@@ -54,6 +67,8 @@ class DocumentChunkingServiceTest {
                 extractionService,
                 new ParentChildChunker(properties),
                 chunkRepository,
+                ingestionJobService,
+                auditService,
                 FIXED_CLOCK
         );
     }
@@ -62,7 +77,7 @@ class DocumentChunkingServiceTest {
     void firstChunkingCreatesChunksAndMarksDocumentChunked() {
         UUID documentId = UUID.randomUUID();
         DocumentMetadata document = document(documentId);
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(emptyChunks(documentId)));
         when(extractionService.extract(document)).thenReturn(Mono.just(new ExtractedDocumentText(
                 documentId,
@@ -93,7 +108,7 @@ class DocumentChunkingServiceTest {
         OffsetDateTime originalCreatedAt = OffsetDateTime.parse("2026-05-10T10:15:30Z");
         ChunkedDocument existing = chunked(documentId, parentId, childId, originalCreatedAt);
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(existing));
 
         StepVerifier.create(service.extractAndChunk(documentId))
@@ -120,7 +135,7 @@ class DocumentChunkingServiceTest {
         UUID childId = UUID.randomUUID();
         ChunkedDocument existing = chunked(documentId, parentId, childId, FIXED_TIME);
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(existing));
         when(documentRepository.updateStatus(documentId, DocumentStatus.CHUNKED, FIXED_TIME)).thenReturn(Mono.empty());
 
@@ -146,7 +161,7 @@ class DocumentChunkingServiceTest {
         UUID regeneratedChildId = UUID.randomUUID();
         ChunkedDocument regenerated = chunked(documentId, regeneratedParentId, regeneratedChildId, FIXED_TIME);
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document));
         when(extractionService.extract(document)).thenReturn(Mono.just(new ExtractedDocumentText(
                 documentId,
                 "Alpha beta gamma delta epsilon.",
@@ -176,7 +191,7 @@ class DocumentChunkingServiceTest {
         UUID documentId = UUID.randomUUID();
         DocumentMetadata document = document(documentId);
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(emptyChunks(documentId)));
         when(extractionService.extract(document)).thenReturn(Mono.just(new ExtractedDocumentText(documentId, " \n ", "text/plain")));
         when(documentRepository.updateStatus(documentId, DocumentStatus.CHUNKING_FAILED, FIXED_TIME)).thenReturn(Mono.empty());
@@ -200,6 +215,9 @@ class DocumentChunkingServiceTest {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return new DocumentMetadata(
                 id,
+                "default",
+                "anonymous",
+                DocumentVisibility.TENANT,
                 "notes.txt",
                 "text/plain",
                 100,

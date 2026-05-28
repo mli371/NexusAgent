@@ -230,27 +230,286 @@ Production changes:
 
 ### Milestone 5: Reranking + Context Construction
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- `Reranker` interface
+- `DeterministicHeuristicReranker`
+- `ParentContextExpansionService`
+- `ContextBuilder`
+- `CitationFormatter`
+- Context debug API at `POST /api/v1/context/debug`
+- Citation-aware context output with selected child chunks and expanded parent chunks
+- Tests for reranking, source boost, parent diversity, parent expansion, parent deduplication, budget trimming, citation formatting, and API routing
+
+How to explain it:
+
+> I added the stage after hybrid retrieval that prepares evidence for later answer generation. The system takes fused child chunk candidates, reranks them with a deterministic heuristic, expands selected child hits to parent chunks, deduplicates repeated parent contexts, applies a character budget, and emits citation metadata. This milestone still does not call a language model or claim final answering exists.
+
+Design defense:
+
+- Reranking is behind an interface so the heuristic can be replaced by a cross-encoder or external rerank API later.
+- The default reranker is deterministic and testable. It uses RRF score, keyword overlap, source signal, and diversity penalties.
+- Child chunks remain retrieval units because they are precise.
+- Parent chunks are context units because they provide enough surrounding text for later answer generation.
+- `parent_chunk_id` connects selected child hits to expanded parent context.
+- Context construction applies a character budget to avoid forwarding unbounded raw chunks.
+- Citations preserve `document_id`, filename, parent chunk ID, child chunk ID, chunk index, character offsets, and preview text.
+
+Failure behavior:
+
+- Invalid `contextBudgetChars` returns a bad-request error.
+- Empty retrieval results produce empty reranked, selected, context, and citation lists.
+- Duplicate parent chunks are skipped during context selection.
+- Over-budget parent text is trimmed and marked as truncated.
+
+Known limitations:
+
+- The reranker is a deterministic heuristic, not a trained model.
+- The budget is character-based, not model-token-based.
+- Section/title metadata is not extracted yet, so citation section title is currently unavailable.
+- The API builds context only; it does not generate final answers, stream responses, use Redis, or call a language model.
+
+Production changes:
+
+- Replace or supplement the heuristic with a real reranker.
+- Use model-aware token budgeting.
+- Add section/title extraction during ingestion.
+- Add retrieval/context observability and evaluation data.
+- Add access control before using context construction with private enterprise documents.
 
 ### Milestone 6: Query API + SSE, With Placeholder State/Cache Interfaces
 
-Status: Not implemented yet.
+Status: Implemented.
 
-Important defense point:
+What was built:
 
-- The query API and SSE flow may exist here, but Redis-backed session/cache/tool-output storage is not complete until Milestone 7.
+- Query REST API at `POST /api/v1/query`
+- SSE query stream API at `POST /api/v1/query/stream`
+- `QueryOrchestrationService` to compose context construction and answer generation
+- `AnswerGenerator` interface
+- `LocalTemplateAnswerGenerator`
+- `SessionStateService` with an in-memory implementation
+- `RetrievalCacheService` with a no-op implementation
+- `ToolOutputStore` with a no-op implementation
+- Tests for query routes, SSE event flow, local answer generation, placeholder services, debug visibility, and timeout fallback
+
+How to explain it:
+
+> I added the user-facing query layer on top of the retrieval and context pipeline. A query request now builds citation-aware context, passes it to a local template answer generator, and returns an answer with citations and a trace ID. The SSE endpoint exposes the same flow as observable stage events. Redis-backed state and cache are intentionally only represented by interfaces here; the real Redis implementations arrive in the next milestone.
+
+Design defense:
+
+- `QueryOrchestrationService` keeps the controller thin and makes the request lifecycle testable.
+- The orchestration composes existing retrieval, reranking, parent expansion, and citation formatting through `ContextBuilder`.
+- `AnswerGenerator` is an integration boundary so a real answer provider can be plugged in later without changing the query API.
+- `LocalTemplateAnswerGenerator` is deliberately named as a local placeholder and states that no external model was called.
+- Debug fields are hidden unless `debug=true`, keeping the default response focused on answer, citations, and trace ID.
+- `SessionStateService`, `RetrievalCacheService`, and `ToolOutputStore` are present as boundaries but use in-memory/no-op implementations in this milestone.
+- The SSE API emits coarse stage events so clients can show progress before real token streaming exists.
+- The SSE API is `POST`-based because it accepts a JSON request body; it works with `curl`, `fetch`-style clients, and server-side HTTP clients, while browser `EventSource` normally expects `GET`.
+
+Failure behavior:
+
+- Blank questions return a bad-request error.
+- `topK < 1` and `contextBudgetChars < 1` return bad-request errors.
+- Context construction has a timeout and retry; a timeout returns an empty local fallback context.
+- Empty or timed-out context produces an explicit insufficient-context answer and no fabricated citations.
+- Answer generation has a timeout; a timeout returns a local timeout answer.
+- Streaming errors emit an `error` SSE event and record a failed session event when a session ID is present.
+
+Known limitations:
+
+- The answer is generated by a local template, not a production LLM.
+- SSE emits stage events and a final message; it does not stream model tokens.
+- `NoOpRetrievalCacheService` does not cache anything.
+- `NoOpToolOutputStore` does not persist intermediate outputs.
+- `InMemorySessionStateService` is process-local and not durable.
+- Redis is still not used by the application in Milestone 6.
+- The Plan-Execute-Critique workflow is added later in Milestone 8.
+
+Next changes:
+
+- Redis-backed session, cache, and tool-output implementations are added in Milestone 7.
+- Add a real answer provider behind `AnswerGenerator`.
+- Add stronger cancellation, tracing, metrics, and timeout policies.
+- Add authentication, authorization, and tenant-aware filtering before exposing private enterprise documents.
 
 ### Milestone 7: Redis State + Cache Integration
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- `RedisSessionStateService`
+- `RedisRetrievalCacheService`
+- `RedisToolOutputStore`
+- `NexusRedisProperties`
+- `RedisKeyFactory`
+- Redis-backed JSON envelopes with `schemaVersion`
+- Property-based selection between Redis-backed services and local fallback services
+- Tests for key format, TTL defaults, serialization, cache hit/miss, session write/read, tool output write/read, oversized value skips, and Redis-down fallback
+
+How to explain it:
+
+> I added Redis as a short-lived state and cache layer behind the interfaces introduced in Milestone 6. Redis now stores recent session events, session summaries, query status, retrieval context cache entries, and temporary tool outputs. PostgreSQL and MinIO remain the source of truth. Redis is allowed to be unavailable; query execution degrades to cache misses and no-op state writes rather than failing the whole request.
+
+Design defense:
+
+- Redis implementations keep the existing `SessionStateService`, `RetrievalCacheService`, and `ToolOutputStore` interfaces stable.
+- Redis is selected with configuration, while in-memory/no-op implementations remain available for local fallback and tests.
+- Redis keys are explicit: `session:{sessionId}:recent`, `session:{sessionId}:summary`, `retrieval:{queryHash}:candidates`, `tool:{sessionId}:{toolCallId}:result`, and `query:{traceId}:status`.
+- Retrieval cache keys include normalized query text, sorted document IDs, effective `topK`, effective context budget, and retrieval/context settings that affect output.
+- Redis values are JSON envelopes with `schemaVersion`, which gives a path for future serialization changes.
+- TTLs differ by data type because session recency, summaries, retrieval cache entries, tool outputs, and query statuses have different useful lifetimes.
+- Value sizes are bounded so Redis is not used as a raw document store.
+- Query responses expose `retrievalCacheStatus` only when `debug=true`, so cache hit/miss behavior is inspectable without changing the public response shape.
+
+Failure behavior:
+
+- Redis cache read failure returns a cache miss.
+- Redis cache write failure is logged and ignored.
+- Redis session or query-status write failure is logged and ignored.
+- Redis tool-output read failure returns empty.
+- Redis tool-output write failure is logged and ignored.
+- Oversized retrieval cache and tool output values are skipped.
+
+Known limitations:
+
+- Retrieval cache invalidation after `force=true` re-chunking is TTL-based only.
+- There are no Redis hit/miss metrics yet.
+- Session state is still recent lifecycle state, not durable conversation memory.
+- Tool outputs are temporary and bounded, not durable workflow history.
+- Redis does not store raw uploaded documents.
+- The Plan-Execute-Critique workflow is added later in Milestone 8.
+
+Production changes:
+
+- Add explicit cache invalidation from chunking and embedding lifecycle events.
+- Add Redis health metrics, cache hit/miss counters, and alerting.
+- Add tenant-aware key prefixes before multi-tenant use.
+- Add encryption or stricter redaction if sensitive intermediate outputs are cached.
+- Tune TTLs and size limits from observed workload behavior.
 
 ### Milestone 8: Plan-Execute-Critique Workflow
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- `AgentOrchestrator`
+- Structured workflow domain objects: `Plan`, `PlanStep`, `PlanAction`, `ExecutionResult`, `CritiqueResult`, and `AgentWorkflowStatus`
+- Agent query API at `POST /api/v1/agent/query`
+- Deterministic rule-based planning
+- Execution through the existing query pipeline when retrieval is needed
+- Direct local response and insufficient-context fallback paths
+- Deterministic critique checks for retrieved context and citations
+- Tool-output storage for plan, execution, and critique outputs
+- Tests for planning, execution, critique, fallback behavior, debug visibility, tool-output writes, and API routing
+
+How to explain it:
+
+> I added a minimal Plan-Execute-Critique workflow around the existing query pipeline. The planner is deterministic and chooses between retrieval-backed answering, direct local response, or explicit fallback. The executor reuses the existing query orchestration for retrieval-backed answers. The critique step checks whether retrieved answers have citations and whether fallback was used. This is not a multi-agent platform and it does not call a production LLM.
+
+Design defense:
+
+- The workflow is intentionally thin and deterministic so it can be explained and tested.
+- `AgentOrchestrator` reuses `QueryOrchestrationService` instead of duplicating retrieval, context construction, answer generation, Redis cache, and session behavior.
+- Plan actions are explicit: `RETRIEVE_CONTEXT`, `GENERATE_ANSWER`, and `FALLBACK_INSUFFICIENT_CONTEXT`.
+- `ExecutionResult` records what actually ran, whether retrieval was used, whether fallback was used, cache status when available, citation count, and notes.
+- `CritiqueResult` is deterministic. It checks insufficient context, missing citations, and whether the answer references a citation marker that exists in the returned citation list.
+- Workflow internals are hidden by default and exposed only with `debug=true`.
+- Intermediate plan, execution, and critique summaries go through `ToolOutputStore`, so Redis TTL and value-size limits apply when Redis is enabled.
+
+Failure behavior:
+
+- Blank questions return a bad-request error.
+- `topK < 1` and `contextBudgetChars < 1` return bad-request errors.
+- Low-information questions return an explicit insufficient-context fallback instead of pretending to answer.
+- Retrieval-backed answers with no context are marked `MISSING_CONTEXT`.
+- Retrieval-backed answers with missing citations are marked `MISSING_CITATIONS`.
+- Tool-output write failures are logged and do not fail the query.
+
+Known limitations:
+
+- The planner is rule-based, not model-generated.
+- The critique step is not a learned judge and does not verify factual correctness.
+- There is no multi-step tool use beyond the existing query pipeline.
+- There is no autonomous background execution.
+- There is no production LLM call.
+- There is no agent SSE endpoint yet.
+- This is not production agent infrastructure.
+
+Production changes:
+
+- Add richer planning policies after the basic workflow has evaluation coverage.
+- Add stronger grounding checks if a real answer generator is introduced.
+- Add explicit workflow metrics and audit history.
+- Add tenant-aware authorization before exposing workflow APIs over private documents.
+- Add cancellation and resumability if workflows become longer-running.
 
 ### Milestone 9: Hardening + Documentation Polish
 
-Status: Not implemented yet.
+Status: Implemented.
+
+What was built:
+
+- Final README polish with an architecture diagram and full local setup path.
+- Schema, API, demo, troubleshooting, limitations, interview-defense, and resume-claims docs.
+- Demo helper script and Makefile targets for the end-to-end local flow.
+- Example documents under `examples/`.
+- A final claim-hygiene pass so deterministic and simplified components are clearly labeled.
+
+How to explain it:
+
+> I closed the MVP by making the repository easy to run and honest to defend. Milestone 9 does not add a major feature; it verifies that the code, docs, demo commands, limitations, and resume wording all describe the same implemented system.
+
+Design defense:
+
+- The demo flow exercises upload, chunking, embedding, retrieval debug, context debug, query, SSE, agent query, and Redis inspection.
+- The docs separate implemented behavior from future improvements.
+- Resume claims are limited to capabilities backed by code.
+- Simplified components remain explicitly named, including local deterministic embeddings, heuristic reranking, local answer generation, and deterministic Plan-Execute-Critique.
+
+Known limitations:
+
+- The project remains a local MVP and is not production ready.
+- No production performance numbers are claimed.
+- No real production LLM answer quality, cross-encoder reranking, or autonomous platform behavior is claimed.
+
+### Milestone 10: Enterprise Readiness Slice
+
+Status: Implemented.
+
+What was built:
+
+- Header-based `RequestContext` using `X-Tenant-Id`, `X-Actor-Id`, and `X-Trace-Id`.
+- `tenant_id`, `owner_id`, and `visibility` fields on `documents`.
+- Tenant-aware document, retrieval, context, query, and agent flows.
+- `audit_events` table and audit writes for upload, chunk, force re-chunk, embed, query, and agent query.
+- `ingestion_jobs` table and synchronous job status rows for chunk/embed endpoints.
+- Safe Actuator health/info exposure and structured lifecycle logs.
+
+How to explain it:
+
+> I added a narrow enterprise-readiness slice: request context, tenant filtering, audit records, ingestion status rows, and basic health/info visibility. I did not claim production enterprise security because real security requires verified authentication and authorization, not trusted headers.
+
+Design defense:
+
+- Tenant filtering happens at the repository layer for document access and retrieval candidates.
+- Retrieval cache keys include tenant and actor context to avoid cross-context cache reuse.
+- Audit metadata avoids raw document text and full context.
+- Ingestion jobs are synchronous records that create a path toward future async workers.
+- Actuator exposure is intentionally limited to health/info.
+
+Known limitations:
+
+- Header-based tenant/actor context is not authentication.
+- There is no full RBAC/ABAC.
+- There is no production tenant isolation guarantee yet.
+- Ingestion jobs are not an async worker queue.
+- Observability is basic and not a full telemetry stack.
 
 ## Trade-Off Language
 
@@ -258,7 +517,7 @@ Use specific, honest language:
 
 - "This is deterministic for local testing, not a production embedding model."
 - "Redis is used as a cache/state store, not the source of truth."
-- "This milestone defines the interface, but the Redis implementation arrives in Milestone 7."
+- "The interface existed before Redis so the query orchestration did not depend directly on Redis APIs."
 - "This design favors clarity and local reproducibility over distributed-system complexity."
 
 Avoid unsupported claims:

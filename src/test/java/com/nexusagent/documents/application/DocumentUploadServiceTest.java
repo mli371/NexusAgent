@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -17,10 +18,13 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentStatus;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.documents.repository.DocumentRepository;
+import com.nexusagent.enterprise.audit.AuditService;
 import com.nexusagent.storage.ObjectKeyFactory;
 import com.nexusagent.storage.ObjectStorageService;
 import com.nexusagent.storage.StoredObject;
@@ -37,6 +41,7 @@ class DocumentUploadServiceTest {
 
     private ObjectStorageService objectStorageService;
     private DocumentRepository documentRepository;
+    private AuditService auditService;
     private UploadProperties uploadProperties;
     private DocumentUploadService service;
 
@@ -44,14 +49,18 @@ class DocumentUploadServiceTest {
     void setUp() {
         objectStorageService = mock(ObjectStorageService.class);
         documentRepository = mock(DocumentRepository.class);
+        auditService = mock(AuditService.class);
         uploadProperties = new UploadProperties();
         uploadProperties.setMaxFileSizeBytes(1024);
+        lenient().when(auditService.record(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Mono.empty());
         service = new DocumentUploadService(
                 objectStorageService,
                 documentRepository,
                 new ObjectKeyFactory(),
                 new UploadedFileInspector(),
                 uploadProperties,
+                auditService,
                 Clock.fixed(Instant.parse("2026-05-07T12:00:00Z"), ZoneOffset.UTC)
         );
     }
@@ -72,8 +81,13 @@ class DocumentUploadServiceTest {
         when(documentRepository.save(any(DocumentMetadata.class)))
                 .thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
 
-        StepVerifier.create(service.upload(filePart))
+        RequestContext context = new RequestContext("tenant-a", "actor-1");
+
+        StepVerifier.create(service.upload(filePart, context, DocumentVisibility.PRIVATE))
                 .assertNext(metadata -> {
+                    assertThat(metadata.tenantId()).isEqualTo("tenant-a");
+                    assertThat(metadata.ownerId()).isEqualTo("actor-1");
+                    assertThat(metadata.visibility()).isEqualTo(DocumentVisibility.PRIVATE);
                     assertThat(metadata.originalFilename()).isEqualTo("sample.txt");
                     assertThat(metadata.contentType()).isEqualTo(MediaType.TEXT_PLAIN_VALUE);
                     assertThat(metadata.sizeBytes()).isEqualTo(content.length);
@@ -89,6 +103,7 @@ class DocumentUploadServiceTest {
         ArgumentCaptor<DocumentMetadata> metadataCaptor = ArgumentCaptor.forClass(DocumentMetadata.class);
         verify(documentRepository).save(metadataCaptor.capture());
         verify(objectStorageService, never()).delete(any(), any());
+        verify(auditService).record(any(), any(), any(), any(), any(), any(), any());
         assertThat(metadataCaptor.getValue().originalFilename()).isEqualTo("sample.txt");
         assertThat(storedPath.get()).isNotNull();
         assertThat(storedPath.get()).doesNotExist();

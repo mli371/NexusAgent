@@ -77,6 +77,8 @@ Expected scope:
 
 ## Milestone 5: Reranking + Context Construction
 
+Status: Implemented.
+
 Add a reranking stage and build citation-aware context from retrieved child chunks expanded to parent chunks.
 
 Expected scope:
@@ -85,9 +87,12 @@ Expected scope:
 - Deterministic/mock reranker
 - Context builder
 - Citation model
+- Context debug API
 - Tests for reranking, context size, and citations
 
 ## Milestone 6: Query API + SSE, With Placeholder State/Cache Interfaces
+
+Status: Implemented.
 
 Implement the query API and SSE response flow. This milestone may define state/cache/tool-output interfaces, but it must not claim Redis-backed behavior is complete.
 
@@ -110,6 +115,8 @@ Out of scope:
 
 ## Milestone 7: Redis State + Cache Integration
 
+Status: Implemented.
+
 Replace or extend the Milestone 6 placeholder interfaces with Redis-backed implementations.
 
 Expected scope:
@@ -122,6 +129,8 @@ Expected scope:
 - Tests for Redis behavior where practical
 
 ## Milestone 8: Plan-Execute-Critique Workflow
+
+Status: Implemented.
 
 Add a minimal Plan-Execute-Critique workflow for query handling without overbuilding multi-agent orchestration.
 
@@ -137,9 +146,11 @@ Out of scope:
 
 - MCP
 - Multi-agent platform abstractions
-- Autonomous background agents
+- Autonomous background workers
 
 ## Milestone 9: Hardening + Documentation Polish
+
+Status: Implemented.
 
 Improve reliability, documentation, local demo quality, and project readiness.
 
@@ -158,6 +169,31 @@ Out of scope:
 - Kubernetes
 - Production performance benchmarking claims
 - Unsupported scale or reliability guarantees
+
+## Milestone 10: Enterprise Readiness Slice
+
+Status: Implemented.
+
+Add a small enterprise-readiness skeleton without building a full production enterprise platform.
+
+Expected scope:
+
+- Header-based tenant and actor request context
+- Tenant fields on documents
+- Tenant-aware document and retrieval filtering
+- Audit events for major lifecycle operations
+- Synchronous ingestion job status rows for chunk/embed APIs
+- Trace propagation for query and agent APIs
+- Safe Actuator health/info endpoints
+
+Out of scope:
+
+- OAuth2, Keycloak, or full authentication
+- Full RBAC/ABAC
+- Production tenant isolation guarantees
+- Async ingestion workers
+- Full OpenTelemetry, Prometheus, or Grafana
+- Production-grade enterprise security claims
 
 ## Definition Of Done For Every Milestone
 

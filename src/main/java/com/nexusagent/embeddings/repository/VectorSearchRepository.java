@@ -1,5 +1,6 @@
 package com.nexusagent.embeddings.repository;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.embeddings.domain.VectorSearchResult;
 import io.r2dbc.spi.Row;
@@ -24,6 +25,16 @@ public class VectorSearchRepository {
     }
 
     public Flux<VectorSearchResult> search(EmbeddingVector queryEmbedding, List<UUID> documentIds, int limit) {
+        return search(queryEmbedding, documentIds, limit, RequestContext.defaults());
+    }
+
+    public Flux<VectorSearchResult> search(
+            EmbeddingVector queryEmbedding,
+            List<UUID> documentIds,
+            int limit,
+            RequestContext context
+    ) {
+        RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
         String documentFilter = documentFilter(documentIds);
         String sql = """
                         WITH query_embedding AS (
@@ -41,7 +52,10 @@ public class VectorSearchRepository {
                             e.embedding <=> query_embedding.embedding AS distance
                         FROM child_chunk_embeddings e
                         JOIN child_chunks c ON c.id = e.child_chunk_id
+                        JOIN documents d ON d.id = c.document_id
                         CROSS JOIN query_embedding
+                        WHERE d.tenant_id = :tenantId
+                          AND (d.visibility = 'TENANT' OR d.owner_id = :actorId)
                         %s
                         ORDER BY e.embedding <=> query_embedding.embedding
                         LIMIT :limit
@@ -49,7 +63,9 @@ public class VectorSearchRepository {
 
         DatabaseClient.GenericExecuteSpec spec = databaseClient.sql(sql)
                 .bind("queryEmbedding", queryEmbedding.toPgVectorLiteral())
-                .bind("limit", limit);
+                .bind("limit", limit)
+                .bind("tenantId", effectiveContext.tenantId())
+                .bind("actorId", effectiveContext.actorId());
         spec = bindDocumentIds(spec, documentIds);
         return spec
                 .map(this::mapResult)
@@ -61,7 +77,7 @@ public class VectorSearchRepository {
             return "";
         }
 
-        StringBuilder builder = new StringBuilder("WHERE c.document_id IN (");
+        StringBuilder builder = new StringBuilder("AND c.document_id IN (");
         for (int index = 0; index < documentIds.size(); index++) {
             if (index > 0) {
                 builder.append(", ");

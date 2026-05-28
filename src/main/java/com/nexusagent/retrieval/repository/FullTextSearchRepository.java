@@ -3,6 +3,7 @@ package com.nexusagent.retrieval.repository;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.retrieval.domain.FullTextSearchResult;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
@@ -20,6 +21,16 @@ public class FullTextSearchRepository {
     }
 
     public Flux<FullTextSearchResult> search(String query, List<UUID> documentIds, int limit) {
+        return search(query, documentIds, limit, RequestContext.defaults());
+    }
+
+    public Flux<FullTextSearchResult> search(
+            String query,
+            List<UUID> documentIds,
+            int limit,
+            RequestContext context
+    ) {
+        RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
         String documentFilter = documentFilter(documentIds);
         String sql = """
                         WITH query_text AS (
@@ -36,8 +47,11 @@ public class FullTextSearchRepository {
                             END AS preview_text,
                             ts_rank_cd(to_tsvector('english', c.text), query_text.query) AS score
                         FROM child_chunks c
+                        JOIN documents d ON d.id = c.document_id
                         CROSS JOIN query_text
                         WHERE to_tsvector('english', c.text) @@ query_text.query
+                          AND d.tenant_id = :tenantId
+                          AND (d.visibility = 'TENANT' OR d.owner_id = :actorId)
                         %s
                         ORDER BY score DESC, c.chunk_index ASC
                         LIMIT :limit
@@ -45,7 +59,9 @@ public class FullTextSearchRepository {
 
         DatabaseClient.GenericExecuteSpec spec = databaseClient.sql(sql)
                 .bind("query", query)
-                .bind("limit", limit);
+                .bind("limit", limit)
+                .bind("tenantId", effectiveContext.tenantId())
+                .bind("actorId", effectiveContext.actorId());
         spec = bindDocumentIds(spec, documentIds);
         return spec
                 .map(this::mapResult)

@@ -5,6 +5,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.GlobalExceptionHandler;
 import com.nexusagent.embeddings.application.ChildChunkEmbeddingService;
 import com.nexusagent.embeddings.domain.EmbeddingStatus;
@@ -29,7 +30,8 @@ class DocumentEmbeddingControllerRouteTest {
     @Test
     void postEmbedRouteHitsController() {
         UUID documentId = UUID.randomUUID();
-        when(childChunkEmbeddingService.embedDocument(documentId)).thenReturn(Mono.just(status(documentId)));
+        RequestContext context = RequestContext.defaults();
+        when(childChunkEmbeddingService.embedDocument(documentId, context)).thenReturn(Mono.just(status(documentId)));
 
         webTestClient.post()
                 .uri("/api/v1/documents/{documentId}/embed", documentId)
@@ -41,13 +43,14 @@ class DocumentEmbeddingControllerRouteTest {
                 .jsonPath("$.embeddedChildChunkCount").isEqualTo(2)
                 .jsonPath("$.complete").isEqualTo(true);
 
-        verify(childChunkEmbeddingService).embedDocument(documentId);
+        verify(childChunkEmbeddingService).embedDocument(documentId, context);
     }
 
     @Test
     void getEmbeddingStatusRouteHitsController() {
         UUID documentId = UUID.randomUUID();
-        when(childChunkEmbeddingService.getStatus(documentId)).thenReturn(Mono.just(status(documentId)));
+        RequestContext context = RequestContext.defaults();
+        when(childChunkEmbeddingService.getStatus(documentId, context)).thenReturn(Mono.just(status(documentId)));
 
         webTestClient.get()
                 .uri("/api/v1/documents/{documentId}/embedding-status", documentId)
@@ -58,7 +61,7 @@ class DocumentEmbeddingControllerRouteTest {
                 .jsonPath("$.missingChildChunkCount").isEqualTo(0)
                 .jsonPath("$.provider").isEqualTo("local");
 
-        verify(childChunkEmbeddingService).getStatus(documentId);
+        verify(childChunkEmbeddingService).getStatus(documentId, context);
     }
 
     private EmbeddingStatus status(UUID documentId) {

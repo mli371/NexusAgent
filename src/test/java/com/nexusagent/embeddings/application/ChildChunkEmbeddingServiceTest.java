@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -19,13 +20,17 @@ import com.nexusagent.chunking.domain.ChildChunk;
 import com.nexusagent.chunking.domain.ChunkedDocument;
 import com.nexusagent.chunking.domain.ParentChunk;
 import com.nexusagent.chunking.repository.ChunkRepository;
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.documents.domain.DocumentMetadata;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.documents.repository.DocumentRepository;
 import com.nexusagent.embeddings.domain.ChildChunkEmbedding;
 import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.embeddings.repository.ChildChunkEmbeddingRepository;
+import com.nexusagent.enterprise.audit.AuditService;
+import com.nexusagent.enterprise.ingestion.IngestionJobService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -43,6 +48,8 @@ class ChildChunkEmbeddingServiceTest {
     private ChunkRepository chunkRepository;
     private EmbeddingService embeddingService;
     private ChildChunkEmbeddingRepository embeddingRepository;
+    private IngestionJobService ingestionJobService;
+    private AuditService auditService;
     private ChildChunkEmbeddingService service;
 
     @BeforeEach
@@ -51,11 +58,19 @@ class ChildChunkEmbeddingServiceTest {
         chunkRepository = mock(ChunkRepository.class);
         embeddingService = mock(EmbeddingService.class);
         embeddingRepository = mock(ChildChunkEmbeddingRepository.class);
+        ingestionJobService = mock(IngestionJobService.class);
+        auditService = mock(AuditService.class);
+        lenient().when(ingestionJobService.run(any(), any(), any(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(3));
+        lenient().when(auditService.record(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Mono.empty());
         service = new ChildChunkEmbeddingService(
                 documentRepository,
                 chunkRepository,
                 embeddingService,
                 embeddingRepository,
+                ingestionJobService,
+                auditService,
                 FIXED_CLOCK
         );
 
@@ -73,7 +88,7 @@ class ChildChunkEmbeddingServiceTest {
                 List.of(firstChild, secondChild)
         );
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document(documentId)));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document(documentId)));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(chunks));
         when(embeddingRepository.findEmbeddedChildChunkIds(documentId)).thenReturn(Flux.empty());
         when(embeddingService.embed("security policy")).thenReturn(Mono.just(VECTOR));
@@ -105,7 +120,7 @@ class ChildChunkEmbeddingServiceTest {
         ChildChunk secondChild = child(documentId, UUID.randomUUID(), 1, "needs embedding");
         ChunkedDocument chunks = new ChunkedDocument(documentId, List.of(), List.of(firstChild, secondChild));
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document(documentId)));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document(documentId)));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(chunks));
         when(embeddingRepository.findEmbeddedChildChunkIds(documentId)).thenReturn(Flux.just(firstChild.id()));
         when(embeddingService.embed("needs embedding")).thenReturn(Mono.just(VECTOR));
@@ -126,7 +141,7 @@ class ChildChunkEmbeddingServiceTest {
         UUID documentId = UUID.randomUUID();
         ChunkedDocument chunks = new ChunkedDocument(documentId, List.of(), List.of());
 
-        when(documentRepository.findById(documentId)).thenReturn(Mono.just(document(documentId)));
+        when(documentRepository.findById(documentId, RequestContext.defaults())).thenReturn(Mono.just(document(documentId)));
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(chunks));
 
         StepVerifier.create(service.embedDocument(documentId))
@@ -143,6 +158,9 @@ class ChildChunkEmbeddingServiceTest {
     private DocumentMetadata document(UUID documentId) {
         return DocumentMetadata.stored(
                 documentId,
+                RequestContext.DEFAULT_TENANT_ID,
+                RequestContext.DEFAULT_ACTOR_ID,
+                DocumentVisibility.TENANT,
                 "handbook.md",
                 "text/markdown",
                 100,

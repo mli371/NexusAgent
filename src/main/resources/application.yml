@@ -1,6 +1,24 @@
 server:
   port: ${SERVER_PORT:8080}
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: NexusAgent
+    description: Enterprise Knowledge Assistant Backend MVP
+    enterprise-readiness: header-based skeleton
+
 spring:
   application:
     name: nexus-agent
@@ -20,10 +38,24 @@ spring:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexusagent}
     user: ${POSTGRES_USER:nexus}
     password: ${POSTGRES_PASSWORD:nexus-local-password}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   codec:
     max-in-memory-size: 1MB
 
 nexus:
+  redis:
+    enabled: ${NEXUS_REDIS_ENABLED:true}
+    recent-session-ttl: ${NEXUS_REDIS_RECENT_SESSION_TTL:24h}
+    session-summary-ttl: ${NEXUS_REDIS_SESSION_SUMMARY_TTL:7d}
+    retrieval-cache-ttl: ${NEXUS_REDIS_RETRIEVAL_CACHE_TTL:30m}
+    tool-output-ttl: ${NEXUS_REDIS_TOOL_OUTPUT_TTL:2h}
+    query-status-ttl: ${NEXUS_REDIS_QUERY_STATUS_TTL:30m}
+    max-recent-session-events: ${NEXUS_REDIS_MAX_RECENT_SESSION_EVENTS:25}
+    max-cache-entry-bytes: ${NEXUS_REDIS_MAX_CACHE_ENTRY_BYTES:131072}
+    max-tool-output-bytes: ${NEXUS_REDIS_MAX_TOOL_OUTPUT_BYTES:65536}
   upload:
     max-file-size-bytes: ${NEXUS_UPLOAD_MAX_FILE_SIZE_BYTES:26214400}
   chunking:
@@ -37,6 +69,12 @@ nexus:
     default-top-k: ${NEXUS_RETRIEVAL_DEFAULT_TOP_K:10}
     max-top-k: ${NEXUS_RETRIEVAL_MAX_TOP_K:50}
     rrf-k: ${NEXUS_RETRIEVAL_RRF_K:60}
+  context:
+    default-budget-chars: ${NEXUS_CONTEXT_DEFAULT_BUDGET_CHARS:4000}
+    max-budget-chars: ${NEXUS_CONTEXT_MAX_BUDGET_CHARS:12000}
+  query:
+    context-timeout: ${NEXUS_QUERY_CONTEXT_TIMEOUT:20s}
+    answer-timeout: ${NEXUS_QUERY_ANSWER_TIMEOUT:5s}
   storage:
     minio:
       endpoint: ${MINIO_ENDPOINT:http://localhost:9000}

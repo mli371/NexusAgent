@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.retrieval.domain.FullTextRetrievalCandidate;
 import com.nexusagent.retrieval.domain.RetrievalSource;
@@ -43,12 +44,13 @@ class HybridRetrievalServiceTest {
         UUID vectorOnlyId = UUID.randomUUID();
         UUID fullTextOnlyId = UUID.randomUUID();
         List<UUID> documentIds = List.of(documentId);
+        RequestContext context = RequestContext.defaults();
 
-        when(semanticRetrievalService.retrieve("security policy", documentIds, 2)).thenReturn(Flux.just(
+        when(semanticRetrievalService.retrieve("security policy", documentIds, 2, context)).thenReturn(Flux.just(
                 vector(sharedChildId, documentId, parentId, 0, 1),
                 vector(vectorOnlyId, documentId, parentId, 1, 2)
         ));
-        when(fullTextRetrievalService.retrieve("security policy", documentIds, 2)).thenReturn(Flux.just(
+        when(fullTextRetrievalService.retrieve("security policy", documentIds, 2, context)).thenReturn(Flux.just(
                 fullText(sharedChildId, documentId, parentId, 0, 1),
                 fullText(fullTextOnlyId, documentId, parentId, 2, 2)
         ));
@@ -64,8 +66,8 @@ class HybridRetrievalServiceTest {
                 })
                 .verifyComplete();
 
-        verify(semanticRetrievalService).retrieve("security policy", documentIds, 2);
-        verify(fullTextRetrievalService).retrieve("security policy", documentIds, 2);
+        verify(semanticRetrievalService).retrieve("security policy", documentIds, 2, context);
+        verify(fullTextRetrievalService).retrieve("security policy", documentIds, 2, context);
     }
 
     @Test
@@ -109,8 +111,8 @@ class HybridRetrievalServiceTest {
                 properties
         );
 
-        when(semanticRetrievalService.retrieve("security policy", List.of(), 5)).thenReturn(Flux.empty());
-        when(fullTextRetrievalService.retrieve("security policy", List.of(), 5)).thenReturn(Flux.empty());
+        when(semanticRetrievalService.retrieve("security policy", List.of(), 5, RequestContext.defaults())).thenReturn(Flux.empty());
+        when(fullTextRetrievalService.retrieve("security policy", List.of(), 5, RequestContext.defaults())).thenReturn(Flux.empty());
 
         StepVerifier.create(service.retrieve("security policy", List.of(), 5))
                 .assertNext(result -> {
@@ -119,6 +121,28 @@ class HybridRetrievalServiceTest {
                     assertThat(result.fusedCandidates()).isEmpty();
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void passesTenantContextToBothRetrievalPaths() {
+        RetrievalProperties properties = new RetrievalProperties();
+        HybridRetrievalService service = new HybridRetrievalService(
+                semanticRetrievalService,
+                fullTextRetrievalService,
+                new RrfFusionService(properties),
+                properties
+        );
+        RequestContext context = new RequestContext("tenant-a", "actor-1");
+
+        when(semanticRetrievalService.retrieve("security policy", List.of(), 5, context)).thenReturn(Flux.empty());
+        when(fullTextRetrievalService.retrieve("security policy", List.of(), 5, context)).thenReturn(Flux.empty());
+
+        StepVerifier.create(service.retrieve("security policy", List.of(), 5, context))
+                .assertNext(result -> assertThat(result.fusedCandidates()).isEmpty())
+                .verifyComplete();
+
+        verify(semanticRetrievalService).retrieve("security policy", List.of(), 5, context);
+        verify(fullTextRetrievalService).retrieve("security policy", List.of(), 5, context);
     }
 
     private SemanticRetrievalCandidate vector(

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.embeddings.application.EmbeddingService;
 import com.nexusagent.embeddings.repository.VectorSearchRepository;
 import com.nexusagent.retrieval.domain.SemanticRetrievalCandidate;
@@ -25,9 +26,18 @@ public class SemanticRetrievalService {
     }
 
     public Flux<SemanticRetrievalCandidate> retrieve(String query, List<UUID> documentIds, int topK) {
+        return retrieve(query, documentIds, topK, RequestContext.defaults());
+    }
+
+    public Flux<SemanticRetrievalCandidate> retrieve(
+            String query,
+            List<UUID> documentIds,
+            int topK,
+            RequestContext context
+    ) {
         AtomicInteger rank = new AtomicInteger(1);
         return embeddingService.embed(query)
-                .flatMapMany(embedding -> vectorSearchRepository.search(embedding, documentIds, topK))
+                .flatMapMany(embedding -> vectorSearchRepository.search(embedding, documentIds, topK, context))
                 .map(result -> new SemanticRetrievalCandidate(
                         result.childChunkId(),
                         result.documentId(),

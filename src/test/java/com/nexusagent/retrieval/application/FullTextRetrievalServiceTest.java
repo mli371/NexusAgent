@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.retrieval.domain.FullTextSearchResult;
 import com.nexusagent.retrieval.repository.FullTextSearchRepository;
 import org.junit.jupiter.api.Test;
@@ -30,7 +31,7 @@ class FullTextRetrievalServiceTest {
         UUID childId = UUID.randomUUID();
         List<UUID> documentIds = List.of(documentId);
 
-        when(fullTextSearchRepository.search("security policy", documentIds, 3)).thenReturn(Flux.just(
+        when(fullTextSearchRepository.search("security policy", documentIds, 3, RequestContext.defaults())).thenReturn(Flux.just(
                 new FullTextSearchResult(
                         childId,
                         documentId,
@@ -51,7 +52,7 @@ class FullTextRetrievalServiceTest {
                 })
                 .verifyComplete();
 
-        verify(fullTextSearchRepository).search("security policy", documentIds, 3);
+        verify(fullTextSearchRepository).search("security policy", documentIds, 3, RequestContext.defaults());
     }
 
     @Test
@@ -62,7 +63,7 @@ class FullTextRetrievalServiceTest {
         UUID firstChildId = UUID.randomUUID();
         UUID secondChildId = UUID.randomUUID();
 
-        when(fullTextSearchRepository.search("security policy", List.of(), 2)).thenReturn(Flux.just(
+        when(fullTextSearchRepository.search("security policy", List.of(), 2, RequestContext.defaults())).thenReturn(Flux.just(
                 new FullTextSearchResult(firstChildId, documentId, parentId, 0, "best keyword hit", 0.90d),
                 new FullTextSearchResult(secondChildId, documentId, parentId, 1, "second keyword hit", 0.40d)
         ));
@@ -77,5 +78,19 @@ class FullTextRetrievalServiceTest {
                             .containsExactly(0.90d, 0.40d);
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void passesTenantContextToFullTextRepository() {
+        FullTextRetrievalService service = new FullTextRetrievalService(fullTextSearchRepository);
+        RequestContext context = new RequestContext("tenant-a", "actor-1");
+
+        when(fullTextSearchRepository.search("security policy", List.of(), 5, context)).thenReturn(Flux.empty());
+
+        StepVerifier.create(service.retrieve("security policy", List.of(), 5, context).collectList())
+                .assertNext(candidates -> assertThat(candidates).isEmpty())
+                .verifyComplete();
+
+        verify(fullTextSearchRepository).search("security policy", List.of(), 5, context);
     }
 }

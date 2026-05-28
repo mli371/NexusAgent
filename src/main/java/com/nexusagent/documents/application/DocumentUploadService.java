@@ -6,10 +6,14 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.documents.domain.DocumentMetadata;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.documents.domain.FileInspection;
 import com.nexusagent.documents.repository.DocumentRepository;
+import com.nexusagent.enterprise.audit.AuditEventType;
+import com.nexusagent.enterprise.audit.AuditService;
 import com.nexusagent.storage.ObjectKeyFactory;
 import com.nexusagent.storage.ObjectStorageService;
 import com.nexusagent.storage.StoredObject;
@@ -32,6 +36,7 @@ public class DocumentUploadService {
     private final ObjectKeyFactory objectKeyFactory;
     private final UploadedFileInspector uploadedFileInspector;
     private final UploadProperties uploadProperties;
+    private final AuditService auditService;
     private final Clock clock;
 
     public DocumentUploadService(
@@ -40,6 +45,7 @@ public class DocumentUploadService {
             ObjectKeyFactory objectKeyFactory,
             UploadedFileInspector uploadedFileInspector,
             UploadProperties uploadProperties,
+            AuditService auditService,
             Clock clock
     ) {
         this.objectStorageService = objectStorageService;
@@ -47,14 +53,21 @@ public class DocumentUploadService {
         this.objectKeyFactory = objectKeyFactory;
         this.uploadedFileInspector = uploadedFileInspector;
         this.uploadProperties = uploadProperties;
+        this.auditService = auditService;
         this.clock = clock;
     }
 
     public Mono<DocumentMetadata> upload(FilePart filePart) {
+        return upload(filePart, RequestContext.defaults(), DocumentVisibility.TENANT);
+    }
+
+    public Mono<DocumentMetadata> upload(FilePart filePart, RequestContext context, DocumentVisibility visibility) {
         return Mono.defer(() -> {
             if (filePart == null) {
                 return Mono.error(new BadRequestException("file part is required"));
             }
+            RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
+            DocumentVisibility effectiveVisibility = visibility == null ? DocumentVisibility.TENANT : visibility;
 
             UUID documentId = UUID.randomUUID();
             String originalFilename = objectKeyFactory.sanitizeFilename(filePart.filename());
@@ -63,7 +76,16 @@ public class DocumentUploadService {
 
             return Mono.usingWhen(
                     createTempFile(documentId),
-                    tempFile -> transferAndStore(filePart, tempFile, documentId, originalFilename, contentType, objectKey),
+                    tempFile -> transferAndStore(
+                            filePart,
+                            tempFile,
+                            documentId,
+                            originalFilename,
+                            contentType,
+                            objectKey,
+                            effectiveContext,
+                            effectiveVisibility
+                    ),
                     this::deleteTempFile,
                     (tempFile, error) -> deleteTempFile(tempFile),
                     this::deleteTempFile
@@ -77,7 +99,9 @@ public class DocumentUploadService {
             UUID documentId,
             String originalFilename,
             String contentType,
-            String objectKey
+            String objectKey,
+            RequestContext context,
+            DocumentVisibility visibility
     ) {
         return filePart.transferTo(tempFile)
                 .then(uploadedFileInspector.inspect(tempFile))
@@ -88,7 +112,9 @@ public class DocumentUploadService {
                                 originalFilename,
                                 contentType,
                                 inspection,
-                                storedObject
+                                storedObject,
+                                context,
+                                visibility
                         )));
     }
 
@@ -97,9 +123,34 @@ public class DocumentUploadService {
             String originalFilename,
             String contentType,
             FileInspection inspection,
-            StoredObject storedObject
+            StoredObject storedObject,
+            RequestContext context,
+            DocumentVisibility visibility
     ) {
-        return saveMetadata(documentId, originalFilename, contentType, inspection, storedObject)
+        return saveMetadata(documentId, originalFilename, contentType, inspection, storedObject, context, visibility)
+                .flatMap(metadata -> auditService.record(
+                                context,
+                                "upload-" + documentId,
+                                AuditEventType.DOCUMENT_UPLOADED,
+                                "document",
+                                documentId,
+                                documentId,
+                                java.util.Map.of(
+                                        "originalFilename", metadata.originalFilename(),
+                                        "sizeBytes", metadata.sizeBytes(),
+                                        "contentType", metadata.contentType(),
+                                        "visibility", metadata.visibility().name()
+                                )
+                        )
+                        .thenReturn(metadata))
+                .doOnSuccess(metadata -> log.info(
+                        "document_uploaded documentId={} tenantId={} actorId={} sizeBytes={} visibility={}",
+                        metadata.id(),
+                        metadata.tenantId(),
+                        metadata.ownerId(),
+                        metadata.sizeBytes(),
+                        metadata.visibility()
+                ))
                 .onErrorResume(error -> cleanupStoredObject(storedObject, error));
     }
 
@@ -128,11 +179,16 @@ public class DocumentUploadService {
             String originalFilename,
             String contentType,
             FileInspection inspection,
-            StoredObject storedObject
+            StoredObject storedObject,
+            RequestContext context,
+            DocumentVisibility visibility
     ) {
         OffsetDateTime now = OffsetDateTime.now(clock);
         DocumentMetadata metadata = DocumentMetadata.stored(
                 documentId,
+                context.tenantId(),
+                context.actorId(),
+                visibility,
                 originalFilename,
                 contentType,
                 inspection.sizeBytes(),

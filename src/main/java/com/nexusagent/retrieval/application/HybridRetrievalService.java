@@ -3,13 +3,18 @@ package com.nexusagent.retrieval.application;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.retrieval.domain.HybridRetrievalResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 @Service
 public class HybridRetrievalService {
+
+    private static final Logger log = LoggerFactory.getLogger(HybridRetrievalService.class);
 
     private final SemanticRetrievalService semanticRetrievalService;
     private final FullTextRetrievalService fullTextRetrievalService;
@@ -29,20 +34,49 @@ public class HybridRetrievalService {
     }
 
     public Mono<HybridRetrievalResult> retrieve(String query, List<UUID> documentIds, Integer requestedTopK) {
+        return retrieve(query, documentIds, requestedTopK, RequestContext.defaults());
+    }
+
+    public Mono<HybridRetrievalResult> retrieve(
+            String query,
+            List<UUID> documentIds,
+            Integer requestedTopK,
+            RequestContext context
+    ) {
         return Mono.defer(() -> {
+            RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
             String normalizedQuery = normalizeQuery(query);
             List<UUID> normalizedDocumentIds = documentIds == null ? List.of() : List.copyOf(documentIds);
             int topK = normalizeTopK(requestedTopK);
 
             return Mono.zip(
-                            semanticRetrievalService.retrieve(normalizedQuery, normalizedDocumentIds, topK).collectList(),
-                            fullTextRetrievalService.retrieve(normalizedQuery, normalizedDocumentIds, topK).collectList()
+                            semanticRetrievalService.retrieve(
+                                    normalizedQuery,
+                                    normalizedDocumentIds,
+                                    topK,
+                                    effectiveContext
+                            ).collectList(),
+                            fullTextRetrievalService.retrieve(
+                                    normalizedQuery,
+                                    normalizedDocumentIds,
+                                    topK,
+                                    effectiveContext
+                            ).collectList()
                     )
                     .map(tuple -> new HybridRetrievalResult(
                             normalizedQuery,
                             tuple.getT1(),
                             tuple.getT2(),
                             rrfFusionService.fuse(tuple.getT1(), tuple.getT2(), topK)
+                    ))
+                    .doOnSuccess(result -> log.info(
+                            "retrieval_completed tenantId={} actorId={} vectorCandidates={} fullTextCandidates={} fusedCandidates={} topK={}",
+                            effectiveContext.tenantId(),
+                            effectiveContext.actorId(),
+                            result.vectorCandidates().size(),
+                            result.fullTextCandidates().size(),
+                            result.fusedCandidates().size(),
+                            topK
                     ));
         });
     }

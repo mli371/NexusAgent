@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.GlobalExceptionHandler;
 import com.nexusagent.retrieval.application.HybridRetrievalService;
 import com.nexusagent.retrieval.domain.FusedRetrievalCandidate;
@@ -54,7 +55,8 @@ class RetrievalDebugControllerRouteTest {
                         0.0325d
                 ))
         );
-        when(hybridRetrievalService.retrieve(eq("security policy"), eq(List.of(documentId)), eq(5)))
+        RequestContext context = RequestContext.defaults();
+        when(hybridRetrievalService.retrieve(eq("security policy"), eq(List.of(documentId)), eq(5), eq(context)))
                 .thenReturn(Mono.just(result));
 
         webTestClient.post()
@@ -78,6 +80,6 @@ class RetrievalDebugControllerRouteTest {
                 .jsonPath("$.fusedCandidates[0].vectorRank").isEqualTo(1)
                 .jsonPath("$.fusedCandidates[0].fullTextRank").isEqualTo(2);
 
-        verify(hybridRetrievalService).retrieve("security policy", List.of(documentId), 5);
+        verify(hybridRetrievalService).retrieve("security policy", List.of(documentId), 5, context);
     }
 }

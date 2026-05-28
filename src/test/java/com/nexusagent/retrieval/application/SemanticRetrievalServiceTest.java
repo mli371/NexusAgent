@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.embeddings.application.EmbeddingService;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.embeddings.domain.VectorSearchResult;
@@ -38,7 +39,7 @@ class SemanticRetrievalServiceTest {
         List<UUID> documentIds = List.of(documentId);
 
         when(embeddingService.embed("security policy")).thenReturn(Mono.just(queryEmbedding));
-        when(vectorSearchRepository.search(queryEmbedding, documentIds, 3)).thenReturn(Flux.just(
+        when(vectorSearchRepository.search(queryEmbedding, documentIds, 3, RequestContext.defaults())).thenReturn(Flux.just(
                 new VectorSearchResult(
                         childId,
                         documentId,
@@ -60,7 +61,7 @@ class SemanticRetrievalServiceTest {
                 .verifyComplete();
 
         verify(embeddingService).embed("security policy");
-        verify(vectorSearchRepository).search(queryEmbedding, documentIds, 3);
+        verify(vectorSearchRepository).search(queryEmbedding, documentIds, 3, RequestContext.defaults());
     }
 
     @Test
@@ -73,7 +74,7 @@ class SemanticRetrievalServiceTest {
         UUID secondChildId = UUID.randomUUID();
 
         when(embeddingService.embed("security policy")).thenReturn(Mono.just(queryEmbedding));
-        when(vectorSearchRepository.search(queryEmbedding, List.of(), 2)).thenReturn(Flux.just(
+        when(vectorSearchRepository.search(queryEmbedding, List.of(), 2, RequestContext.defaults())).thenReturn(Flux.just(
                 new VectorSearchResult(firstChildId, documentId, parentId, 0, "best vector hit", 0.10d),
                 new VectorSearchResult(secondChildId, documentId, parentId, 1, "second vector hit", 0.20d)
         ));
@@ -96,10 +97,26 @@ class SemanticRetrievalServiceTest {
         EmbeddingVector queryEmbedding = new EmbeddingVector(List.of(1.0f, 0.0f, 0.0f));
 
         when(embeddingService.embed("security policy")).thenReturn(Mono.just(queryEmbedding));
-        when(vectorSearchRepository.search(queryEmbedding, List.of(), 5)).thenReturn(Flux.empty());
+        when(vectorSearchRepository.search(queryEmbedding, List.of(), 5, RequestContext.defaults())).thenReturn(Flux.empty());
 
         StepVerifier.create(service.retrieve("security policy", List.of(), 5).collectList())
                 .assertNext(candidates -> assertThat(candidates).isEmpty())
                 .verifyComplete();
+    }
+
+    @Test
+    void passesTenantContextToVectorRepository() {
+        SemanticRetrievalService service = new SemanticRetrievalService(embeddingService, vectorSearchRepository);
+        EmbeddingVector queryEmbedding = new EmbeddingVector(List.of(1.0f, 0.0f, 0.0f));
+        RequestContext context = new RequestContext("tenant-a", "actor-1");
+
+        when(embeddingService.embed("security policy")).thenReturn(Mono.just(queryEmbedding));
+        when(vectorSearchRepository.search(queryEmbedding, List.of(), 5, context)).thenReturn(Flux.empty());
+
+        StepVerifier.create(service.retrieve("security policy", List.of(), 5, context).collectList())
+                .assertNext(candidates -> assertThat(candidates).isEmpty())
+                .verifyComplete();
+
+        verify(vectorSearchRepository).search(queryEmbedding, List.of(), 5, context);
     }
 }

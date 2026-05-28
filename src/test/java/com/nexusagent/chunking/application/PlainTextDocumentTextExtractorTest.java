@@ -10,6 +10,7 @@ import java.util.UUID;
 
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentStatus;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.storage.ObjectStorageService;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -50,6 +51,9 @@ class PlainTextDocumentTextExtractorTest {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return new DocumentMetadata(
                 id,
+                "default",
+                "anonymous",
+                DocumentVisibility.TENANT,
                 filename,
                 contentType,
                 100,

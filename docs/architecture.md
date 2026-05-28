@@ -10,7 +10,7 @@ The system is designed as a maintainable backend project with clear boundaries, 
 
 ## Current Architecture
 
-Milestones 1, 2, 3, and 4 are implemented.
+Milestones 1 through 10 are implemented.
 
 ```text
 Client
@@ -37,7 +37,7 @@ GET /api/v1/documents
 GET /api/v1/health
 ```
 
-Redis is available in Docker Compose but is not used by the application through Milestone 4.
+Redis is used by the query layer for short-lived state and cache. It is not the source of truth.
 
 Milestone 2 adds text extraction and parent-child chunking:
 
@@ -115,7 +115,133 @@ HybridRetrievalService
         +-- preserve debug metadata for each candidate
 ```
 
-This is a retrieval debug API, not a query-answering API. It returns ranked candidates and fusion details so the retrieval stage can be inspected before Milestone 5 adds reranking and context construction.
+This is a retrieval debug API, not a query-answering API. It returns ranked candidates and fusion details so the retrieval stage can be inspected.
+
+Milestone 5 adds reranking and context construction:
+
+```text
+POST /api/v1/context/debug
+  |
+  v
+ContextDebugController
+  |
+  v
+ContextBuilder
+  |
+  +-- HybridRetrievalService -> fused child chunk candidates
+  +-- Reranker
+  |     +-- DeterministicHeuristicReranker by default
+  |
+  +-- ParentContextExpansionService
+  |     +-- ChunkRepository -> child and parent chunks
+  |     +-- DocumentRepository -> original filenames
+  |
+  +-- CitationFormatter
+        +-- citation markers
+        +-- final context text
+```
+
+This is a context debug API, not a final query-answering API. It produces reranked candidates, selected child chunks, expanded parent contexts, citations, and final context text for inspection.
+
+Milestone 6 adds the query API and SSE response flow:
+
+```text
+POST /api/v1/query
+  |
+  v
+QueryController
+  |
+  v
+QueryOrchestrationService
+  |
+  +-- SessionStateService -> InMemorySessionStateService
+  +-- RetrievalCacheService -> NoOpRetrievalCacheService
+  +-- ContextBuilder -> retrieval, reranking, parent expansion, citations
+  +-- AnswerGenerator -> LocalTemplateAnswerGenerator
+  +-- ToolOutputStore -> NoOpToolOutputStore
+```
+
+Streaming API:
+
+```text
+POST /api/v1/query/stream
+  |
+  +-- received
+  +-- retrieving
+  +-- reranking
+  +-- building_context
+  +-- generating
+  +-- message
+  +-- completed
+```
+
+Milestone 7 adds Redis-backed implementations behind the same query interfaces:
+
+```text
+QueryOrchestrationService
+  |
+  +-- SessionStateService -> RedisSessionStateService
+  |     +-- session:{sessionId}:recent
+  |     +-- session:{sessionId}:summary
+  |     +-- query:{traceId}:status
+  |
+  +-- RetrievalCacheService -> RedisRetrievalCacheService
+  |     +-- retrieval:{queryHash}:candidates
+  |
+  +-- ToolOutputStore -> RedisToolOutputStore
+        +-- tool:{sessionId}:{toolCallId}:result
+```
+
+The Milestone 6 in-memory/no-op implementations remain available when Redis is disabled. Redis entries use JSON envelopes with `schemaVersion` values and configurable TTLs. Redis read failures degrade to cache misses, and Redis write failures are logged as no-op writes.
+
+When query debug mode is enabled, the API includes `retrievalCacheStatus` with `hit` or `miss`. Normal non-debug query responses omit this field.
+
+Milestone 8 adds a minimal Plan-Execute-Critique workflow over the query pipeline:
+
+```text
+POST /api/v1/agent/query
+  |
+  v
+AgentQueryController
+  |
+  v
+AgentOrchestrator
+  |
+  +-- Plan
+  |     +-- deterministic rules choose one of:
+  |         +-- RETRIEVE_CONTEXT
+  |         +-- GENERATE_ANSWER
+  |         +-- FALLBACK_INSUFFICIENT_CONTEXT
+  |
+  +-- Execute
+  |     +-- existing QueryOrchestrationService for retrieval-backed answers
+  |     +-- local deterministic direct/fallback responses for simple cases
+  |     +-- ToolOutputStore for plan/execution/critique outputs
+  |
+  +-- Critique
+        +-- checks retrieval usage
+        +-- checks insufficient-context fallback
+        +-- checks citation presence and answer citation markers that exist in the citation list
+```
+
+This is not a multi-agent platform. It is a thin deterministic workflow layer around the existing query pipeline.
+
+Milestone 10 adds an enterprise-readiness slice:
+
+```text
+Incoming request
+  |
+  +-- X-Tenant-Id / X-Actor-Id -> RequestContext
+  +-- X-Trace-Id -> query or agent trace when provided
+  |
+  +-- documents.tenant_id / owner_id / visibility
+  +-- retrieval repositories join documents for tenant filtering
+  +-- audit_events records upload/chunk/embed/query/agent lifecycle events
+  +-- ingestion_jobs records synchronous chunk/embed status transitions
+  +-- Actuator exposes health/info only
+```
+
+This is a skeleton, not production authentication or full authorization.
 
 ## Target Architecture
 
@@ -142,14 +268,16 @@ Spring Boot WebFlux API
   |     +-- Vector search: implemented in Milestone 4
   |     +-- PostgreSQL full-text search: implemented in Milestone 4
   |     +-- RRF fusion: implemented in Milestone 4
-  |     +-- Reranking
-  |     +-- Context construction with citations
+  |     +-- Reranking: deterministic heuristic implemented in Milestone 5
+  |     +-- Context construction with citations: implemented as debug API in Milestone 5
   |
   +-- Query workflow
-        +-- Query API
-        +-- SSE response flow
-        +-- Session/cache/tool output interfaces
-        +-- Redis-backed implementations in Milestone 7
+        +-- Query API: implemented in Milestone 6
+        +-- SSE response flow: implemented in Milestone 6
+        +-- Session/cache/tool output interfaces: implemented in Milestone 6
+        +-- Redis-backed implementations: implemented in Milestone 7
+        +-- Plan-Execute-Critique workflow: implemented in Milestone 8
+        +-- Enterprise-readiness skeleton: implemented in Milestone 10
 ```
 
 ## Storage Responsibilities
@@ -159,8 +287,12 @@ Spring Boot WebFlux API
 - `parent_chunks` stores larger context blocks.
 - `child_chunks` stores smaller windows with `parent_chunk_id` relationships.
 - `child_chunk_embeddings` stores PgVector embeddings for child chunks only.
+- `audit_events` stores bounded lifecycle audit metadata.
+- `ingestion_jobs` stores synchronous chunk/embed job status.
 - PostgreSQL full-text search indexes `child_chunks.text` for keyword retrieval.
-- Redis stores short-lived session state, retrieval cache entries, and intermediate tool outputs after Milestone 7.
+- Redis stores short-lived session state, retrieval cache entries, query status values, and intermediate tool outputs.
+- Redis values are bounded and TTL-based. Raw uploaded documents are not stored in Redis.
+- Every Redis key written by the application has a positive TTL.
 
 Redis is not the source of truth.
 
@@ -194,8 +326,9 @@ com.nexusagent
   chunking
   embeddings
   retrieval
+  context
   query
-  workflow
+  agent
   cache
 ```
 
@@ -210,14 +343,29 @@ com.nexusagent
 - Store embeddings in a separate table so provider/model metadata and vectors do not bloat the chunk metadata table.
 - Use RRF for hybrid retrieval because vector distances and full-text ranks are not directly comparable.
 - Preserve vector rank, vector distance, full-text rank, full-text score, and RRF score in the debug API so retrieval behavior is inspectable.
-- Add Redis only after the query API exists, so the project does not imply cache/state behavior before it is real.
+- Keep reranking behind a `Reranker` interface so the deterministic heuristic can later be replaced by a cross-encoder or external rerank API.
+- Use parent chunks for final context text, while keeping child chunks as the precise retrieval and citation unit.
+- Apply a character budget in context construction so the API does not pass an unbounded set of raw chunks forward.
+- Add Redis only after the query API exists, so the state/cache interfaces have real call sites before adding infrastructure.
+- Treat Redis as an optimization and short-lived state store; cache failures must not break the query API.
+- Keep answer generation behind `AnswerGenerator`; Milestone 6 uses a local template generator so the API can be exercised without external model credentials.
+- Return query debug fields only when requested so normal API responses expose citations without leaking internal retrieval/context payloads by default.
+- Keep the Plan-Execute-Critique workflow deterministic and thin; it should orchestrate the existing query pipeline, not introduce a new autonomous agent platform.
+- Store workflow plan/execution/critique outputs through `ToolOutputStore` so Redis TTL and size-limit behavior applies when Redis is enabled.
 - Use deterministic local providers for tests and demos to avoid live AI dependencies in the core test suite.
 
 ## Known Limitations
 
 - Text extraction supports only UTF-8 text and Markdown-like files.
 - The local deterministic embedding provider is not a production semantic model.
-- Hybrid retrieval is implemented only as a debug API; reranking, context construction, query answering, SSE, and Redis-backed behavior are not implemented yet.
+- Query answering uses `LocalTemplateAnswerGenerator`, which is a local placeholder and not a production LLM answer service.
+- The agent workflow is a deterministic rule-based workflow, not a full autonomous or multi-agent system.
+- The critique step validates citation presence and markers, not factual correctness with a learned judge.
+- The workflow is not production agent infrastructure.
+- SSE emits query stage events and a final message, but it does not stream tokens from a production LLM.
+- Redis cache invalidation after forced re-chunking is TTL-based for now; there is no active invalidation hook yet.
+- Redis failures degrade to misses/no-op writes, but cache health metrics are not implemented yet.
+- The default reranker is heuristic and deterministic, not a trained cross-encoder.
 - Full-text search currently uses PostgreSQL's English text search configuration.
 - Uploads are buffered through temporary local files before MinIO storage.
 - `force=true` chunk replacement deletes and recreates stored chunks for a document, but no chunk-version history exists yet.

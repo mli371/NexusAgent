@@ -5,7 +5,12 @@ target/
 .env
 .env.*
 !.env.example
+.demo-document-id
 *.log
+logs/
+tmp/
+.tmp/
+*.tmp
 *.iml
 *.pem
 *.key

@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import com.nexusagent.chunking.application.DocumentChunkingService;
 import com.nexusagent.chunking.domain.ChunkedDocument;
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.GlobalExceptionHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,7 +31,8 @@ class DocumentChunkControllerRouteTest {
     @Test
     void postChunksRouteHitsController() {
         UUID documentId = UUID.randomUUID();
-        when(documentChunkingService.extractAndChunk(documentId, false))
+        RequestContext context = RequestContext.defaults();
+        when(documentChunkingService.extractAndChunk(documentId, context, false))
                 .thenReturn(Mono.just(new ChunkedDocument(documentId, List.of(), List.of())));
 
         webTestClient.post()
@@ -42,13 +44,14 @@ class DocumentChunkControllerRouteTest {
                 .jsonPath("$.parentChunkCount").isEqualTo(0)
                 .jsonPath("$.childChunkCount").isEqualTo(0);
 
-        verify(documentChunkingService).extractAndChunk(documentId, false);
+        verify(documentChunkingService).extractAndChunk(documentId, context, false);
     }
 
     @Test
     void postChunksForceRoutePassesForceTrue() {
         UUID documentId = UUID.randomUUID();
-        when(documentChunkingService.extractAndChunk(documentId, true))
+        RequestContext context = RequestContext.defaults();
+        when(documentChunkingService.extractAndChunk(documentId, context, true))
                 .thenReturn(Mono.just(new ChunkedDocument(documentId, List.of(), List.of())));
 
         webTestClient.post()
@@ -58,13 +61,14 @@ class DocumentChunkControllerRouteTest {
                 .expectBody()
                 .jsonPath("$.documentId").isEqualTo(documentId.toString());
 
-        verify(documentChunkingService).extractAndChunk(documentId, true);
+        verify(documentChunkingService).extractAndChunk(documentId, context, true);
     }
 
     @Test
     void getChunksRouteHitsController() {
         UUID documentId = UUID.randomUUID();
-        when(documentChunkingService.getChunks(documentId))
+        RequestContext context = RequestContext.defaults();
+        when(documentChunkingService.getChunks(documentId, context))
                 .thenReturn(Mono.just(new ChunkedDocument(documentId, List.of(), List.of())));
 
         webTestClient.get()
@@ -76,7 +80,7 @@ class DocumentChunkControllerRouteTest {
                 .jsonPath("$.parentChunkCount").isEqualTo(0)
                 .jsonPath("$.childChunkCount").isEqualTo(0);
 
-        verify(documentChunkingService).getChunks(documentId);
+        verify(documentChunkingService).getChunks(documentId, context);
     }
 
     @Test

@@ -3,8 +3,10 @@ package com.nexusagent.documents.repository;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
+import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentStatus;
+import com.nexusagent.documents.domain.DocumentVisibility;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -25,6 +27,9 @@ public class DocumentRepository {
         return databaseClient.sql("""
                         INSERT INTO documents (
                             id,
+                            tenant_id,
+                            owner_id,
+                            visibility,
                             original_filename,
                             content_type,
                             size_bytes,
@@ -37,6 +42,9 @@ public class DocumentRepository {
                         )
                         VALUES (
                             :id,
+                            :tenantId,
+                            :ownerId,
+                            :visibility,
                             :originalFilename,
                             :contentType,
                             :sizeBytes,
@@ -49,6 +57,9 @@ public class DocumentRepository {
                         )
                         """)
                 .bind("id", metadata.id())
+                .bind("tenantId", metadata.tenantId())
+                .bind("ownerId", metadata.ownerId())
+                .bind("visibility", metadata.visibility().name())
                 .bind("originalFilename", metadata.originalFilename())
                 .bind("contentType", metadata.contentType())
                 .bind("sizeBytes", metadata.sizeBytes())
@@ -67,6 +78,9 @@ public class DocumentRepository {
         return databaseClient.sql("""
                         SELECT
                             id,
+                            tenant_id,
+                            owner_id,
+                            visibility,
                             original_filename,
                             content_type,
                             size_bytes,
@@ -80,6 +94,35 @@ public class DocumentRepository {
                         WHERE id = :id
                         """)
                 .bind("id", id)
+                .map(this::mapRow)
+                .one();
+    }
+
+    public Mono<DocumentMetadata> findById(UUID id, RequestContext context) {
+        RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
+        return databaseClient.sql("""
+                        SELECT
+                            id,
+                            tenant_id,
+                            owner_id,
+                            visibility,
+                            original_filename,
+                            content_type,
+                            size_bytes,
+                            sha256,
+                            minio_bucket,
+                            minio_object_key,
+                            status,
+                            created_at,
+                            updated_at
+                        FROM documents
+                        WHERE id = :id
+                          AND tenant_id = :tenantId
+                          AND (visibility = 'TENANT' OR owner_id = :actorId)
+                        """)
+                .bind("id", id)
+                .bind("tenantId", effectiveContext.tenantId())
+                .bind("actorId", effectiveContext.actorId())
                 .map(this::mapRow)
                 .one();
     }
@@ -103,6 +146,9 @@ public class DocumentRepository {
         return databaseClient.sql("""
                         SELECT
                             id,
+                            tenant_id,
+                            owner_id,
+                            visibility,
                             original_filename,
                             content_type,
                             size_bytes,
@@ -122,9 +168,43 @@ public class DocumentRepository {
                 .all();
     }
 
+    public Flux<DocumentMetadata> findAll(RequestContext context, int limit, int offset) {
+        RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
+        return databaseClient.sql("""
+                        SELECT
+                            id,
+                            tenant_id,
+                            owner_id,
+                            visibility,
+                            original_filename,
+                            content_type,
+                            size_bytes,
+                            sha256,
+                            minio_bucket,
+                            minio_object_key,
+                            status,
+                            created_at,
+                            updated_at
+                        FROM documents
+                        WHERE tenant_id = :tenantId
+                          AND (visibility = 'TENANT' OR owner_id = :actorId)
+                        ORDER BY created_at DESC
+                        LIMIT :limit OFFSET :offset
+                        """)
+                .bind("tenantId", effectiveContext.tenantId())
+                .bind("actorId", effectiveContext.actorId())
+                .bind("limit", limit)
+                .bind("offset", offset)
+                .map(this::mapRow)
+                .all();
+    }
+
     private DocumentMetadata mapRow(Row row, RowMetadata rowMetadata) {
         return new DocumentMetadata(
                 row.get("id", UUID.class),
+                row.get("tenant_id", String.class),
+                row.get("owner_id", String.class),
+                DocumentVisibility.valueOf(row.get("visibility", String.class)),
                 row.get("original_filename", String.class),
                 row.get("content_type", String.class),
                 requireLong(row, "size_bytes"),
