@@ -83,6 +83,26 @@ class LiveContextCacheIntegrationTest {
         client = WebTestClient.bindToApplicationContext(application).configureClient().responseTimeout(Duration.ofSeconds(15)).build();
         identity = RequestContext.fromHeaders("cache-" + UUID.randomUUID(), "alice");
         model.embeddingCalls.set(0); model.answerCalls.set(0); model.beforeAnswer.set(Mono::empty);
+        model.resetRewrite();
+    }
+
+    @Test void resolvedQuestionControlsCacheKeyAcrossDifferentHistoriesAndNeverCachesHistory() {
+        var doc = fixture(identity);
+        java.util.function.Function<QueryRequest, WebTestClient.ResponseSpec> post = request -> client.post().uri("/api/v1/query")
+                .header("X-Tenant-Id", identity.tenantId()).header("X-Actor-Id", identity.actorId()).bodyValue(request).exchange();
+        post.apply(new QueryRequest("first", "security policy 2024", List.of(doc.documentId()), 5, 1000, true, "documents"))
+                .expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        var followUp = LiveQueryIntegrationTest.historyRequest(doc.documentId(), true);
+        model.resolution.set(new com.nexusagent.query.application.QuestionResolution("rewritten", "security policy 2024", null, "RESOLVED_REFERENCES"));
+        post.apply(followUp).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("hit")
+                .jsonPath("$.queryResolution.originalQuestion").isEqualTo("What about it?");
+        model.resolution.set(new com.nexusagent.query.application.QuestionResolution("rewritten", "security policy 2025", null, "RESOLVED_REFERENCES"));
+        var changedHistory = new QueryRequest("other-page", followUp.question(), followUp.documentIds(), 5, 1000, true, "documents",
+                List.of(new com.nexusagent.query.api.ConversationTurn("policy 2025?", "another-history-answer", false)));
+        post.apply(changedHistory).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        assertThat(model.rewriteCalls).hasValue(2); assertThat(model.embeddingCalls).hasValue(2); assertThat(model.answerCalls).hasValue(3);
+        var values = redis.keys("retrieval:live-context-v1:*:context").flatMap(key -> redis.opsForValue().get(key)).collectList().block();
+        assertThat(values).allSatisfy(value -> assertThat(value).doesNotContain("old-private-answer", "another-history-answer", "queryResolution", "What about it?"));
     }
 
     @Test void repeatedQueryHitsRedisButStillGeneratesANewAnswerAndRealSseTrace() {
@@ -94,6 +114,11 @@ class LiveContextCacheIntegrationTest {
                 .getResponseBody().collectList().block(Duration.ofSeconds(15));
         var response = events.get(events.size() - 1).response();
         assertThat(response.retrievalCacheStatus()).isEqualTo("hit");
+        assertThat(response.contextDebug().debugMetadata().allocationStrategy()).isEqualTo("child-first-v1");
+        assertThat(response.stages()).anySatisfy(s -> {
+            assertThat(s.stage()).isEqualTo("child_selection"); assertThat(s.status()).isEqualTo("skipped");
+            assertThat(s.summary()).containsEntry("reason", "cache_reuse");
+        });
         assertThat(response.citations().get(0).childChunkId()).isEqualTo(doc.childChunks().get(0).id());
         assertThat(events).allMatch(e -> e.traceId().equals(response.traceId()));
         assertThat(response.stages()).anySatisfy(s -> {
@@ -178,19 +203,70 @@ class LiveContextCacheIntegrationTest {
         assertThat(revision(doc.documentId())).isGreaterThan(before);
     }
 
+    @Test void paraphraseUsesSemanticCacheWithOneEmbeddingAndFreshAnswerWithoutReseeding() {
+        var doc = fixture(identity);
+        var ids = List.of(doc.documentId());
+        query(identity, ids, "documents", false, "What does the security policy require?", true, 5, 1000)
+                .expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        var scopeKeys = redis.keys("retrieval:semantic-context-v1:*").collectList().block();
+        assertThat(scopeKeys).isNotEmpty();
+        long sourcesBefore = redis.opsForZSet().size(scopeKeys.get(scopeKeys.size() - 1)).block();
+        var events = query(identity, ids, "documents", true, "Which security policy requirement applies?", true, 5, 1000)
+                .expectStatus().isOk().returnResult(QueryStreamEvent.class).getResponseBody().collectList().block();
+        var response = events.get(events.size() - 1).response();
+        assertThat(response.retrievalCacheStatus()).isEqualTo("semantic_hit");
+        assertThat(response.contextDebug().query()).isEqualTo("Which security policy requirement applies?");
+        assertThat(response.stages()).anySatisfy(stage -> {
+            assertThat(stage.stage()).isEqualTo("query_embedding"); assertThat(stage.status()).isEqualTo("succeeded");
+        }).anySatisfy(stage -> {
+            assertThat(stage.stage()).isEqualTo("semantic_cache_lookup"); assertThat(stage.summary()).containsEntry("cacheStatus", "semantic_hit");
+        }).anySatisfy(stage -> {
+            assertThat(stage.stage()).isEqualTo("vector_search"); assertThat(stage.status()).isEqualTo("skipped");
+        });
+        assertThat(events).allMatch(event -> event.traceId().equals(response.traceId()));
+        assertThat(model.embeddingCalls).hasValue(2); assertThat(model.answerCalls).hasValue(2);
+        assertThat(redis.opsForZSet().size(scopeKeys.get(scopeKeys.size() - 1)).block()).isEqualTo(sourcesBefore);
+        query(identity, ids, "documents", false, "Which security policy requirement applies?", false, 5, 1000)
+                .expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").doesNotExist()
+                .jsonPath("$.contextDebug").doesNotExist().jsonPath("$.stages").doesNotExist();
+        assertThat(model.embeddingCalls).hasValue(3); assertThat(model.answerCalls).hasValue(3);
+    }
+
+    @Test void semanticScopeHonorsPublicActorTenantSettingsRevisionsAndLexicalGuards() {
+        var doc = fixture(identity); var ids = List.of(doc.documentId());
+        database.sql("UPDATE documents SET visibility='TENANT' WHERE id=:id").bind("id", doc.documentId()).fetch().rowsUpdated().block();
+        query(identity, ids, "documents", false, "What policy applies in 2024?", true, 5, 1000).expectStatus().isOk();
+        for (String question : List.of("What policy applies in 2025?", "What policy does not apply in 2024?", "Compare policies in 2024")) {
+            query(identity, ids, "documents", false, question, true, 5, 1000).expectStatus().isOk().expectBody()
+                    .jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        }
+        query(RequestContext.fromHeaders(identity.tenantId(), "bob"), ids, "documents", false,
+                "Which policy applies in 2024?", true, 5, 1000).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        query(RequestContext.fromHeaders("foreign", "alice"), ids, "documents", false,
+                "Which policy applies in 2024?", true, 5, 1000).expectStatus().isNotFound();
+        query(identity, ids, "documents", false, "Which policy applies in 2024?", true, 6, 1000).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        query(identity, ids, "documents", false, "Which policy applies in 2024?", true, 5, 1001).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+        embed(doc);
+        query(identity, ids, "documents", false, "Which policy applies in 2024?", true, 5, 1000).expectStatus().isOk().expectBody().jsonPath("$.retrievalCacheStatus").isEqualTo("miss");
+    }
+
     @Test @Order(Integer.MAX_VALUE) @DirtiesContext
     void actualRedisOutageDoesNotPreventAQuery() {
         var doc = fixture(identity);
         redisContainer.stop();
-        query(identity, List.of(doc.documentId()), "documents", false).expectStatus().isOk().expectBody()
+        query(identity, List.of(doc.documentId()), "documents", false, "What is the policy?", true, 5, 1000).expectStatus().isOk().expectBody()
                 .jsonPath("$.retrievalCacheStatus").isEqualTo("miss").jsonPath("$.answerStatus").isEqualTo("answered");
         assertThat(model.embeddingCalls).hasValue(1); assertThat(model.answerCalls).hasValue(1);
     }
 
     private WebTestClient.ResponseSpec query(RequestContext actor, List<UUID> ids, String scope, boolean stream) {
+        return query(actor, ids, scope, stream, "security policy", true, 5, 1000);
+    }
+    private WebTestClient.ResponseSpec query(RequestContext actor, List<UUID> ids, String scope, boolean stream,
+                                              String question, boolean debug, int topK, int budget) {
         return client.post().uri(stream ? "/api/v1/query/stream" : "/api/v1/query")
                 .header("X-Tenant-Id", actor.tenantId()).header("X-Actor-Id", actor.actorId())
-                .bodyValue(new QueryRequest("cache-session", "security policy", ids, 5, 1000, true, scope)).exchange();
+                .bodyValue(new QueryRequest("cache-session", question, ids, topK, budget, debug, scope)).exchange();
     }
     private ChunkedDocument fixture(RequestContext actor) {
         UUID id = UUID.randomUUID();

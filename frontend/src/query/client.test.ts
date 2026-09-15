@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackendClient } from "../api/client";
 import { streamQuery } from "./client";
-import { queryEvents, queryModel, queryRequest, queryResponse, sse, traceId } from "../test/queryFixtures";
+import { queryEvents, queryModel, queryRequest, queryResponse, semanticResponse, sse, traceId, withResolution } from "../test/queryFixtures";
 import type { QueryEvent, QueryResponse } from "./types";
 
 const api = new BackendClient({ tenantId: "tenant-a", actorId: "owner-a" });
@@ -17,11 +17,39 @@ function transport(events: QueryEvent[], split = 137) {
 }
 afterEach(() => vi.unstubAllGlobals());
 describe("real query SSE transport", () => {
-  it.each(["hit", "miss", "bypassed"] as const)("accepts validated %s cache responses without repeating the POST", async status => {
+  it("accepts follow-up resolution and clarification only with matching history metadata and skipped downstream stages", async () => {
+    const request = { ...queryRequest, question: "Which one?", history: [{ question: "Policy?", answer: "Earlier hints", answerTruncated: false }] };
+    const callback = vi.fn();
+    transport(queryEvents(withResolution(queryResponse(), request, "Which policy requires approval?")));
+    await streamQuery(api, request, traceId, queryModel, new AbortController().signal, callback);
+    expect(callback.mock.calls.at(-1)?.[0].response.queryResolution.status).toBe("rewritten");
+    transport(queryEvents(withResolution(queryResponse(), request, "", "Which policy do you mean?")));
+    await expect(streamQuery(api, request, traceId, queryModel, new AbortController().signal, callback)).resolves.toBeUndefined();
+    expect(callback.mock.calls.at(-1)?.[0].response.citations).toEqual([]);
+    const invalid = withResolution(queryResponse(), request, "", "Which policy?");
+    invalid.stages.find(s => s.stage === "answer_generation")!.status = "succeeded";
+    transport(queryEvents(invalid));
+    await expect(streamQuery(api, request, traceId, queryModel, new AbortController().signal, callback)).rejects.toMatchObject({ code: "INVALID_QUERY_STREAM" });
+  });
+  it("rejects another original question or missing resolution for a history-bearing request", async () => {
+    const request = { ...queryRequest, history: [{ question: "Policy?", answer: "Prior answer", answerTruncated: false }] };
+    const value = withResolution(queryResponse(), request); value.queryResolution!.originalQuestion = "different user question";
+    for (const response of [value, queryResponse()]) {
+      transport(queryEvents(response));
+      await expect(streamQuery(api, request, traceId, queryModel, new AbortController().signal, vi.fn())).rejects.toMatchObject({ code: "INVALID_QUERY_STREAM" });
+    }
+  });
+  it.each(["hit", "semantic_hit", "miss", "bypassed"] as const)("accepts validated %s cache responses without repeating the POST", async status => {
     const response = queryResponse(); response.retrievalCacheStatus = status;
     const fetcher = transport(queryEvents(response));
     await expect(run()).resolves.toBeUndefined();
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("accepts semantic lookup events and preserves the correlated final response", async () => {
+    const response = semanticResponse(), callback = vi.fn();
+    transport(queryEvents(response));
+    await run(callback);
+    expect(callback.mock.calls.at(-1)?.[0].response.retrievalCacheStatus).toBe("semantic_hit");
   });
   it("handles split frames with one scoped POST; holds message until correlated completion", async () => {
     const fetcher = transport(queryEvents()), callback = vi.fn();
@@ -52,6 +80,10 @@ describe("real query SSE transport", () => {
     ["missing selected child", (r: QueryResponse) => { r.contextDebug.selectedChildChunks = []; }],
     ["missing parent", (r: QueryResponse) => { r.contextDebug.expandedParentContexts = []; }],
     ["invalid scope count", (r: QueryResponse) => { r.scope.excludedDocumentCount = 99; }],
+    ["budget overflow", (r: QueryResponse) => { r.contextDebug.debugMetadata.usedBudgetChars = 4001; }],
+    ["fake coverage count", (r: QueryResponse) => { r.contextDebug.debugMetadata.selectedChildChunkCount = 5; }],
+    ["missing allocation details", (r: QueryResponse) => { r.contextDebug.debugMetadata = {}; }],
+    ["truncated child evidence", (r: QueryResponse) => { r.contextDebug.expandedParentContexts[0] = { ...r.contextDebug.expandedParentContexts[0], charEnd: 130 }; }],
   ])("rejects %s without exposing completed answer", async (_name, mutate) => {
     const response = structuredClone(queryResponse()); mutate(response);
     transport(queryEvents(response)); const callback = vi.fn();

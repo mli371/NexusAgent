@@ -32,7 +32,8 @@ final class AnswerCitationValidator {
                     && c.chunkIndex() == citation.chunkIndex() && c.charStart() == citation.charStart()
                     && c.charEnd() == citation.charEnd() && c.originalFilename().equals(citation.originalFilename()));
             boolean parent = context.expandedParentContexts().stream().anyMatch(p -> p.parentChunkId().equals(citation.parentChunkId())
-                    && p.documentId().equals(citation.documentId()) && p.childChunkIds().contains(citation.childChunkId()));
+                    && p.documentId().equals(citation.documentId()) && p.childChunkIds().contains(citation.childChunkId())
+                    && p.charStart() <= citation.charStart() && p.charEnd() >= citation.charEnd());
             if (!child || !parent || !context.finalContextText().contains(citation.citationMarker())) { throw invalid(); }
         }
         return used;

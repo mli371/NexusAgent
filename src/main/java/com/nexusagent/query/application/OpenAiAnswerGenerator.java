@@ -67,6 +67,8 @@ public class OpenAiAnswerGenerator implements AnswerGenerator {
                             usedCitationMarkers must contain the exact bracketed markers present in answer, once each.
                             Never put bare IDs such as C1 or unused references in usedCitationMarkers.
                             If the evidence does not answer the question, return insufficient_context with no claims or citations.
+                            Missing information means it is absent from the supplied excerpts, not necessarily from the knowledge base.
+                            Never infer that a document or year does not exist in the library from these limited excerpts.
                             The answer's citation markers and usedCitationMarkers must be identical sets.
                             Do not invent facts, execute actions, or reveal hidden reasoning.
                             """), Map.of("role", "user", "content", evidence)),

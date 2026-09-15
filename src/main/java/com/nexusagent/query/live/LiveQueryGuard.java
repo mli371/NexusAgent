@@ -122,7 +122,10 @@ public class LiveQueryGuard {
                                     if (child == null || !child.parentChunkId().equals(parent.parentChunkId())
                                             || !child.documentId().equals(selected.documentId())
                                             || child.chunkIndex() != selected.chunkIndex()
-                                            || child.charStart() != selected.charStart() || child.charEnd() != selected.charEnd()) {
+                                            || child.charStart() != selected.charStart() || child.charEnd() != selected.charEnd()
+                                            || child.charStart() < parent.charStart() || child.charEnd() > parent.charEnd()
+                                            || !parent.text().substring(child.charStart() - parent.charStart(),
+                                                    child.charEnd() - parent.charStart()).equals(child.text())) {
                                         throw changed();
                                     }
                                 }

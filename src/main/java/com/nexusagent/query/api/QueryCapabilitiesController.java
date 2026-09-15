@@ -34,11 +34,13 @@ public class QueryCapabilitiesController {
                 live == null ? "Offline query mode; set NEXUS_ANSWER_PROVIDER=openai and configure real embeddings"
                         : "Live pipeline configured; document readiness is checked per request. Credentials/account availability are not probed.",
                 live == null ? "legacy_only" : live.cacheMode(), 2000, 10, live == null ? null : live.modelName(),
-                java.util.List.of("library", "documents"), com.nexusagent.query.live.QueryLibraryRepository.MAX_DOCUMENTS);
+                java.util.List.of("library", "documents"), com.nexusagent.query.live.QueryLibraryRepository.MAX_DOCUMENTS,
+                live != null && live.pageFollowUpSupported(), ConversationTurn.MAX_TURNS);
     }
 
     public record Capabilities(String activeAnswerGenerator, EmbeddingModelInfo embedding,
                                boolean openAiAnswerAdapterAvailable, boolean liveQueryReady, String reason,
                                String retrievalCacheMode, int liveQuestionMaxChars, int liveDocumentLimit, String answerModel,
-                               java.util.List<String> queryScopes, int maxLibraryDocuments) { }
+                               java.util.List<String> queryScopes, int maxLibraryDocuments,
+                               boolean pageFollowUpSupported, int maxHistoryTurns) { }
 }

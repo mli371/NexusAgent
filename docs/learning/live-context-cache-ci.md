@@ -9,8 +9,8 @@
 ```text
 请求 -> 身份/可访问范围/向量就绪检查 -> 文档版本快照
   -> Redis cache lookup
-     miss: 问题向量 + 混合检索 -> RRF -> 重排 -> parent context -> 复查 -> 写缓存
-     hit: 读取缓存 -> 格式/关联/证据/权限复查 -> 跳过上述七个阶段
+     miss: 问题向量 + 混合检索 -> RRF -> 重排 -> child 预留 -> parent 均衡扩展 -> 上下文 -> 复查 -> 写缓存
+     hit: 读取缓存 -> 格式/关联/证据/权限复查 -> 跳过上述八个阶段
   -> 版本复查 -> 回答模型 -> 引用校验 -> 最终证据/权限/版本复查 -> 返回
 ```
 
@@ -50,7 +50,7 @@ V10 给 documents 加 `retrieval_revision`，默认 0。PostgreSQL 触发器在 
 ## 前端怎么看
 
 - cache_lookup：hit / miss / bypassed 与原因。
-- hit 后：query embedding、两条检索、RRF、重排、父块扩展、上下文构建显示“缓存复用 / 未执行”。0 不是测得的执行时间。
+- hit 后：query embedding、两条检索、RRF、重排、child 选择、父块扩展、上下文构建显示“缓存复用 / 未执行”。0 不是测得的执行时间。
 - 阶段详情：候选、分数、片段标为来自缓存；模型回答与引用校验仍是本次实际执行。
 - debug=false 隐藏上下文、候选及缓存调试字段；普通日志仍可关联 cache lookup 的 trace。
 
@@ -58,6 +58,7 @@ V10 给 documents 加 `retrieval_revision`，默认 0。PostgreSQL 触发器在 
 
 - `LiveContextService`：cache-aside 主流程、缓存证据检查。
 - `LiveContextCacheKey`：结构化 key，算法改动须升级 PIPELINE_VERSION。
+- 当前 `child-first-v1` 分配版本同时进入 exact key 与 semantic scope；context envelope 已升级为 schemaVersion=2，旧贪心结果不再命中，按原 TTL 过期。返回的分配诊断标为缓存来源。
 - `LiveContextSnapshotRepository`：授权过滤后的数据库版本快照与复查。
 - `RedisLiveContextCache`：JSON、TTL、大小上限、异常降级。
 - `LiveQueryService`：新回答生成、最终校验与状态/审计关联。
@@ -84,6 +85,8 @@ npm run test:e2e --prefix frontend
 > I cache retrieval context, not final answers. The key includes tenant and actor scope, retrieval settings, model identity, and document revisions maintained transactionally in PostgreSQL. A cache hit still requires authorization and evidence checks before the model call and before returning the response. Redis failures fall back to fresh retrieval. TTL bounds retention, while revisions handle logical invalidation. This is not a production authentication or serializable authorization guarantee.
 
 ## CI
+
+后续扩展增加了可关闭的语义缓存，详见 [语义缓存学习笔记](semantic-context-cache.md)。本笔记描述精确缓存契约；语义复用仍沿用这些权限、版本及 TTL 边界。
 
 [GitHub Actions 配置与边界](../ci.md)运行同一套可重复测试，不使用私人 API key，不自动部署。测试通过证明所测行为，不等于生产可靠性、答案质量或性能指标。
 

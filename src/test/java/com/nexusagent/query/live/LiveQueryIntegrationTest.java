@@ -87,6 +87,7 @@ class LiveQueryIntegrationTest {
         model.embeddingCalls.set(0);
         model.answerCalls.set(0);
         model.beforeAnswer.set(Mono::empty);
+        model.resetRewrite();
     }
 
     @Test
@@ -101,6 +102,8 @@ class LiveQueryIntegrationTest {
                 .jsonPath("$.retrievalDebug.vectorCandidates[0].documentId").isEqualTo(document.documentId().toString())
                 .jsonPath("$.retrievalDebug.fullTextCandidates[0].documentId").isEqualTo(document.documentId().toString())
                 .jsonPath("$.contextDebug.expandedParentContexts.length()").isEqualTo(1)
+                .jsonPath("$.contextDebug.debugMetadata.allocationStrategy").isEqualTo("child-first-v1")
+                .jsonPath("$.contextDebug.debugMetadata.allocations[0].status").isEqualTo("INCLUDED")
                 .returnResult();
         assertThat(model.embeddingCalls).hasValue(1);
         assertThat(model.answerCalls).hasValue(1);
@@ -139,10 +142,26 @@ class LiveQueryIntegrationTest {
         var succeeded = events.stream().filter(event -> event.stage() != null && "succeeded".equals(event.stage().status()))
                 .map(event -> event.stage().stage()).toList();
         assertThat(succeeded).contains("access_check", "embedding_readiness", "query_embedding", "vector_search", "full_text_search",
-                "rrf_fusion", "reranking", "parent_expansion", "context_building", "answer_generation", "citation_validation");
+                "rrf_fusion", "reranking", "child_selection", "parent_expansion", "context_building", "answer_generation", "citation_validation");
         assertThat(succeeded.indexOf("rrf_fusion")).isGreaterThan(succeeded.indexOf("full_text_search"));
         assertThat(succeeded.indexOf("rrf_fusion")).isGreaterThan(succeeded.indexOf("vector_search"));
         assertThat(succeeded.indexOf("answer_generation")).isGreaterThan(succeeded.indexOf("context_building"));
+        assertThat(succeeded.indexOf("child_selection")).isGreaterThan(succeeded.indexOf("reranking"));
+        assertThat(succeeded.indexOf("parent_expansion")).isGreaterThan(succeeded.indexOf("child_selection"));
+        assertThat(succeeded.indexOf("context_building")).isGreaterThan(succeeded.indexOf("parent_expansion"));
+    }
+
+    @Test void budgetExclusionDoesNotCallAnswerModelOrCreateCitations() {
+        var document = fixture(true, MODEL);
+        client.post().uri("/api/v1/query").header("X-Tenant-Id", OWNER.tenantId()).header("X-Actor-Id", OWNER.actorId())
+                .bodyValue(new QueryRequest("budget", "security policy", List.of(document.documentId()), 5, 1, true, "documents"))
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.answerStatus").isEqualTo("insufficient_context")
+                .jsonPath("$.citations.length()").isEqualTo(0)
+                .jsonPath("$.finalContextText").isEqualTo("")
+                .jsonPath("$.contextDebug.debugMetadata.skippedBudgetCount").isEqualTo(1)
+                .jsonPath("$.contextDebug.debugMetadata.allocations[0].status").isEqualTo("CHILD_EXCEEDS_REMAINING_BUDGET");
+        assertThat(model.answerCalls).hasValue(0);
     }
 
     @Test
@@ -206,7 +225,65 @@ class LiveQueryIntegrationTest {
                 .bodyValue(new QueryRequest("s", " ", List.of(), 0, 0, true)).exchange().expectStatus().isBadRequest();
         client.get().uri("/api/v1/query/capabilities").exchange().expectStatus().isOk().expectBody()
                 .jsonPath("$.liveQueryReady").isEqualTo(true).jsonPath("$.retrievalCacheMode").isEqualTo("bypassed")
-                .jsonPath("$.answerModel").isEqualTo("gpt-5.6-luna").jsonPath("$.apiKey").doesNotExist();
+                .jsonPath("$.answerModel").isEqualTo("gpt-5.6-luna").jsonPath("$.apiKey").doesNotExist()
+                .jsonPath("$.pageFollowUpSupported").isEqualTo(true).jsonPath("$.maxHistoryTurns").isEqualTo(3);
+    }
+
+    @Test
+    void pageFollowUpUsesResolvedQueryButNotHistoricalAnswerInFinalPrompt() {
+        var document = fixture(true, MODEL);
+        client.post().uri("/api/v1/query").header("X-Tenant-Id", OWNER.tenantId()).header("X-Actor-Id", OWNER.actorId())
+                .header("X-Trace-Id", "follow-up-route").bodyValue(historyRequest(document.documentId(), true))
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.queryResolution.status").isEqualTo("rewritten")
+                .jsonPath("$.queryResolution.originalQuestion").isEqualTo("What about it?")
+                .jsonPath("$.queryResolution.resolvedQuestion").isEqualTo("security policy")
+                .jsonPath("$.retrievalDebug.query").isEqualTo("security policy")
+                .jsonPath("$.contextDebug.query").isEqualTo("security policy");
+        assertThat(model.rewriteCalls).hasValue(1);
+        assertThat(model.embeddingCalls).hasValue(1);
+        assertThat(model.answerCalls).hasValue(1);
+        assertThat(model.answerInput.get()).contains("Question:\nsecurity policy").doesNotContain("old-private-answer", "What about it?", "[C99]");
+        var audit = db.sql("SELECT metadata_json::text AS metadata FROM audit_events WHERE trace_id='follow-up-route'")
+                .map(row -> row.get("metadata", String.class)).one().block();
+        assertThat(audit).contains("resolvedQuestionHash", "historyTurnsUsed").doesNotContain("old-private-answer", "What about it?");
+    }
+
+    @Test
+    void clarificationSseAndPublicResponseHaveNoEvidenceOrFinalModelCall() {
+        var document = fixture(true, MODEL);
+        model.resolution.set(new com.nexusagent.query.application.QuestionResolution("needs_clarification", null, "Which policy?", "AMBIGUOUS_REFERENCES"));
+        var events = client.post().uri("/api/v1/query/stream").header("X-Tenant-Id", OWNER.tenantId()).header("X-Actor-Id", OWNER.actorId())
+                .header("X-Trace-Id", "clarify-route").bodyValue(historyRequest(document.documentId(), true)).exchange()
+                .expectStatus().isOk().expectHeader().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM)
+                .returnResult(QueryStreamEvent.class).getResponseBody().collectList().block(Duration.ofSeconds(15));
+        assertThat(events).allMatch(e -> e.traceId().equals("clarify-route"));
+        assertThat(events.get(events.size() - 1).response().answerStatus()).isEqualTo("needs_clarification");
+        client.post().uri("/api/v1/query").header("X-Tenant-Id", OWNER.tenantId()).header("X-Actor-Id", OWNER.actorId())
+                .bodyValue(historyRequest(document.documentId(), false)).exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.answerStatus").isEqualTo("needs_clarification").jsonPath("$.citations.length()").isEqualTo(0)
+                .jsonPath("$.queryResolution").doesNotExist().jsonPath("$.contextDebug").doesNotExist()
+                .jsonPath("$.stages").doesNotExist().jsonPath("$.finalContextText").doesNotExist();
+        assertThat(model.rewriteCalls).hasValue(2); assertThat(model.embeddingCalls).hasValue(0); assertThat(model.answerCalls).hasValue(0);
+    }
+
+    @Test
+    void invalidHistoryTypesAndForeignTenantFailBeforeAnyModelCall() {
+        var doc = fixture(true, MODEL);
+        client.post().uri("/api/v1/query").header("X-Tenant-Id", "foreign").bodyValue(historyRequest(doc.documentId(), true))
+                .exchange().expectStatus().isNotFound();
+        for (String path : List.of("/api/v1/query", "/api/v1/query/stream")) {
+            client.post().uri(path).contentType(MediaType.APPLICATION_JSON).bodyValue("""
+                    {"question":"q","history":[{"question":42,"answer":"secret-history"}]}
+                    """).exchange().expectStatus().isBadRequest().expectBody(String.class)
+                    .value(body -> assertThat(body).doesNotContain("secret-history"));
+        }
+        assertThat(model.rewriteCalls).hasValue(0); assertThat(model.answerCalls).hasValue(0); assertThat(model.embeddingCalls).hasValue(0);
+    }
+
+    static QueryRequest historyRequest(UUID id, boolean debug) {
+        return new QueryRequest("history-session", "What about it?", List.of(id), 5, 1000, debug, "documents",
+                List.of(new com.nexusagent.query.api.ConversationTurn("Earlier policy?", "old-private-answer [C99]", false)));
     }
 
     @Test
@@ -297,6 +374,13 @@ class LiveQueryIntegrationTest {
         final AtomicInteger embeddingCalls = new AtomicInteger();
         final AtomicInteger answerCalls = new AtomicInteger();
         final AtomicReference<Supplier<Mono<Void>>> beforeAnswer = new AtomicReference<>(Mono::empty);
+        final AtomicInteger rewriteCalls = new AtomicInteger();
+        final AtomicReference<String> answerInput = new AtomicReference<>();
+        final AtomicReference<com.nexusagent.query.application.QuestionResolution> resolution = new AtomicReference<>();
+        void resetRewrite() {
+            rewriteCalls.set(0); answerInput.set(null);
+            resolution.set(new com.nexusagent.query.application.QuestionResolution("rewritten", "security policy", null, "RESOLVED_REFERENCES"));
+        }
     }
 
     @TestConfiguration
@@ -316,7 +400,23 @@ class LiveQueryIntegrationTest {
                         "status", "completed", "output", List.of(java.util.Map.of("type", "message", "role", "assistant", "content",
                                 List.of(java.util.Map.of("type", "output_text", "text", mapper.writeValueAsString(java.util.Map.of(
                                         "status", "answered", "answer", "Approval is required [C1]", "usedCitationMarkers", List.of("[C1]"))))))))))));
-            })).build());
+            })).build()) {
+                @Override
+                public Mono<com.fasterxml.jackson.databind.JsonNode> post(String path, java.util.Map<String, Object> body, Duration timeout, boolean retry) {
+                    var request = mapper.valueToTree(body);
+                    if ("question_resolution".equals(request.path("text").path("format").path("name").asText())) {
+                        return Mono.fromCallable(() -> {
+                            state.rewriteCalls.incrementAndGet();
+                            assertThat(retry).isFalse();
+                            return mapper.valueToTree(java.util.Map.of("status", "completed", "output", List.of(java.util.Map.of(
+                                    "type", "message", "role", "assistant", "content", List.of(java.util.Map.of(
+                                            "type", "output_text", "text", mapper.writeValueAsString(state.resolution.get())))))));
+                        });
+                    }
+                    if (path.endsWith("responses")) state.answerInput.set(request.path("input").get(1).path("content").asText());
+                    return super.post(path, body, timeout, retry);
+                }
+            };
         }
         private static ClientResponse response(String body) {
             return ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/json").body(body).build();

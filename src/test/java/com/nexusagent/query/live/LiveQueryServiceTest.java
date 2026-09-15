@@ -45,6 +45,7 @@ class LiveQueryServiceTest {
     final QueryProperties properties = new QueryProperties();
     final OpenAiProperties openAi = new OpenAiProperties();
     final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    final QuestionResolver resolver = mock(QuestionResolver.class);
     LiveQueryService service;
     ContextBuildResult evidence;
 
@@ -66,7 +67,7 @@ class LiveQueryServiceTest {
                 LiveContextCache.disabled(), new com.nexusagent.embeddings.domain.EmbeddingModelInfo("openai", "test", 384),
                 new RetrievalProperties(), mapper);
         service = new LiveQueryService(cachedContexts, answers, guard, sessions, tools, audit, properties,
-                openAi, new RetrievalProperties(), new ContextProperties(), mapper);
+                openAi, new RetrievalProperties(), new ContextProperties(), mapper, resolver);
     }
 
     @Test
@@ -76,7 +77,8 @@ class LiveQueryServiceTest {
         assertThat(result.answerProvider()).isEqualTo("openai");
         assertThat(result.answerStatus()).isEqualTo("answered");
         String json = mapper.writeValueAsString(result);
-        assertThat(json).doesNotContain("finalContextText", "retrievalDebug", "contextDebug", "stages", "limitations", "retrievalCacheStatus");
+        assertThat(json).doesNotContain("finalContextText", "retrievalDebug", "contextDebug", "stages", "limitations", "retrievalCacheStatus", "queryResolution");
+        verifyNoInteractions(resolver);
         verify(answers, times(1)).generate(anyString(), any());
         verify(guard, times(2)).evidence(any(), any());
     }
@@ -264,5 +266,92 @@ class LiveQueryServiceTest {
     static ContextBuildResult emptyEvidence() {
         return new ContextBuildResult("policy", List.of(), List.of(), List.of(), List.of(), "",
                 new ContextDebugMetadata("heuristic", 0, 0, 0, 0, 1000, 0, 0, 0));
+    }
+
+    @Test
+    void followUpResolvesBeforeRetrievalAndAnswerAndNeverStoresHistory() throws Exception {
+        when(resolver.resolve(anyString(), anyList())).thenReturn(Mono.just(new QuestionResolution("rewritten", "Synthetic policy comparison?", null, "RESOLVED_REFERENCES")));
+        var result = service.execute(followUp(true), "follow-up", OWNER).block();
+        var order = inOrder(resolver, contexts, answers);
+        order.verify(resolver).resolve(eq("How do they differ?"), anyList());
+        order.verify(contexts).build(eq("Synthetic policy comparison?"), eq(List.of(DOC)), eq(5), eq(1000), eq(OWNER));
+        order.verify(answers).generate(eq("Synthetic policy comparison?"), same(evidence));
+        assertThat(result.queryResolution().originalQuestion()).isEqualTo("How do they differ?");
+        assertThat(result.queryResolution().historyTurnsUsed()).isEqualTo(1);
+        assertThat(result.queryResolution().modelCalled()).isTrue();
+        assertThat(mapper.writeValueAsString(result.stages())).doesNotContain("How do they", "old-private-answer", "Synthetic policy comparison");
+        var capture = org.mockito.ArgumentCaptor.forClass(Object.class);
+        verify(tools).save(anyString(), eq("query-summary"), capture.capture());
+        assertThat(capture.getValue().toString()).contains("historyTurnsUsed=1").doesNotContain("old-private-answer", "How do they");
+        service.execute(followUp(false), "follow-up-public", OWNER).as(StepVerifier::create)
+                .assertNext(value -> assertThat(value.queryResolution()).isNull()).verifyComplete();
+    }
+
+    @Test
+    void clarificationAndResolverRefusalSkipAllDownstreamWorkAndFinishSseWithOneTrace() {
+        for (var resolution : List.of(new QuestionResolution("needs_clarification", null, "Which documents?", "AMBIGUOUS_REFERENCES"), QuestionResolution.refused())) {
+            when(resolver.resolve(anyString(), anyList())).thenReturn(Mono.just(resolution));
+            var events = service.stream(followUp(true), "clarification", OWNER).map(e -> e.data()).collectList().block();
+            assertThat(events).allMatch(e -> e.traceId().equals("clarification"));
+            assertThat(events.subList(events.size() - 2, events.size())).extracting(QueryStreamEvent::type).containsExactly("message", "completed");
+            var response = events.get(events.size() - 1).response();
+            assertThat(response.answerStatus()).isEqualTo(resolution.status());
+            assertThat(response.citations()).isEmpty();
+            assertThat(response.finalContextText()).isEmpty();
+            assertThat(response.retrievalCacheStatus()).isEqualTo("bypassed");
+            assertThat(response.contextDebug().selectedChildChunks()).isEmpty();
+            assertThat(response.stages()).hasSizeLessThan(48).anySatisfy(stage -> {
+                assertThat(stage.stage()).isEqualTo("answer_generation"); assertThat(stage.status()).isEqualTo("skipped");
+            });
+        }
+        verifyNoInteractions(contexts);
+        verify(answers, never()).generate(anyString(), any());
+        verify(sessions, times(2)).recordCompleted(anyString(), anyString());
+    }
+
+    @Test
+    void rewriteTimeoutAndFailureNeverFallThroughOrRetry() {
+        when(resolver.resolve(anyString(), anyList())).thenReturn(Mono.never());
+        StepVerifier.withVirtualTime(() -> service.execute(followUp(true), "rewrite-timeout", OWNER))
+                .thenAwait(Duration.ofSeconds(21)).expectErrorSatisfies(error ->
+                        assertThat(((QueryFailure) error).code()).isEqualTo("QUERY_REWRITE_TIMEOUT")).verify();
+        verify(resolver, times(1)).resolve(anyString(), anyList());
+        when(resolver.resolve(anyString(), anyList())).thenReturn(Mono.error(new OperationException(HttpStatus.BAD_GATEWAY,
+                "INVALID_QUERY_REWRITE_RESPONSE", "Invalid resolution")));
+        var events = service.stream(followUp(true), "invalid-resolution", OWNER).map(e -> e.data()).collectList().block();
+        assertThat(events.get(events.size() - 1).code()).isEqualTo("INVALID_QUERY_REWRITE_RESPONSE");
+        assertThat(events).noneMatch(e -> e.response() != null || e.type().equals("message"));
+        verifyNoInteractions(contexts);
+        verify(answers, never()).generate(anyString(), any());
+    }
+
+    @Test
+    void inaccessibleDocumentsPreventHistoryEgressAndExcessHistoryFailsBeforeAccess() {
+        when(guard.access(any())).thenReturn(Mono.error(new OperationException(HttpStatus.NOT_FOUND, "DOCUMENT_NOT_ACCESSIBLE", "Not accessible")));
+        StepVerifier.create(service.execute(followUp(true), "denied", OWNER)).expectError(QueryFailure.class).verify();
+        verifyNoInteractions(resolver, contexts);
+        clearInvocations(guard);
+        var invalid = new QueryRequest("s", "q", List.of(DOC), 5, 1000, true, "documents",
+                java.util.Collections.nCopies(4, followUp(true).history().get(0)));
+        StepVerifier.create(service.execute(invalid, "oversize", OWNER)).expectErrorSatisfies(error ->
+                assertThat(((QueryFailure) error).status()).isEqualTo(HttpStatus.BAD_REQUEST)).verify();
+        verifyNoInteractions(guard);
+    }
+
+    static QueryRequest followUp(boolean debug) {
+        return new QueryRequest("session-1", "How do they differ?", List.of(DOC), 5, 1000, debug, "documents",
+                List.of(new com.nexusagent.query.api.ConversationTurn("Synthetic policy?", "old-private-answer [C99]", false)));
+    }
+
+    @Test
+    void cancellingDuringResolutionCancelsPublisherAndNeverStartsRetrieval() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        when(resolver.resolve(anyString(), anyList())).thenReturn(Mono.<QuestionResolution>never().doOnCancel(() -> cancelled.set(true)));
+        StepVerifier.create(service.stream(followUp(true), "cancel-resolution", OWNER))
+                .thenConsumeWhile(event -> event.data().stage() == null || !event.data().stage().stage().equals("query_resolution"))
+                .thenCancel().verify(Duration.ofSeconds(5));
+        assertThat(cancelled).isTrue();
+        verifyNoInteractions(contexts);
+        verify(answers, never()).generate(anyString(), any());
     }
 }

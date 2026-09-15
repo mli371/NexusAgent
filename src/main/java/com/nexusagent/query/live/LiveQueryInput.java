@@ -49,6 +49,10 @@ record LiveQueryInput(String traceId, String sessionId, String question, List<UU
         return new LiveQueryInput(traceId, sessionId, question, List.copyOf(ids), topK, budget, debug, context, scope);
     }
 
+    LiveQueryInput withQuestion(String resolvedQuestion) {
+        return new LiveQueryInput(traceId, sessionId, resolvedQuestion, documentIds, topK, budget, debug, context, scope);
+    }
+
     private static void validIdentifier(String value, String name) {
         if (value.length() > 120 || !value.matches("[A-Za-z0-9._:-]+")) {
             throw new BadRequestException(name + " must be at most 120 letters, digits or . _ : -");

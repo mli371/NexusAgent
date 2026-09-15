@@ -24,7 +24,7 @@ public class EmbeddingService {
         return embeddingProvider.modelInfo();
     }
 
-    private EmbeddingVector requireExpectedDimension(EmbeddingVector embedding) {
+    public EmbeddingVector requireExpectedDimension(EmbeddingVector embedding) {
         int expectedDimension = modelInfo().dimension();
         if (embedding.dimension() != expectedDimension) {
             throw new BadRequestException(

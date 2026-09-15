@@ -1,6 +1,17 @@
 import type { Json } from "../api/types";
 
 export type QueryScope = "library" | "documents";
+export interface ConversationTurn { question: string; answer: string; answerTruncated: boolean }
+export interface QueryResolution {
+  originalQuestion: string;
+  resolvedQuestion: string | null;
+  status: "unchanged" | "rewritten" | "needs_clarification" | "refused";
+  reasonCode: string;
+  historyTurnsUsed: number;
+  modelCalled: boolean;
+  resolverModel: string | null;
+  resolverVersion: string;
+}
 export interface QueryRequest {
   sessionId: string;
   question: string;
@@ -9,6 +20,7 @@ export interface QueryRequest {
   topK: number;
   contextBudgetChars: number;
   debug: true;
+  history?: ConversationTurn[];
 }
 export interface Capabilities {
   liveQueryReady: boolean;
@@ -17,6 +29,8 @@ export interface Capabilities {
   embedding: { provider: string; modelName: string; dimension: number };
   queryScopes?: QueryScope[];
   maxLibraryDocuments?: number;
+  pageFollowUpSupported?: boolean;
+  maxHistoryTurns?: number;
   reason: string;
 }
 export interface EmbeddingStatus {
@@ -65,12 +79,13 @@ export interface ParentContext {
 export interface QueryResponse {
   traceId: string;
   answer: string;
-  answerStatus: "answered" | "insufficient_context" | "refused";
+  answerStatus: "answered" | "insufficient_context" | "refused" | "needs_clarification";
+  queryResolution?: QueryResolution;
   answerProvider: "openai";
   answerModel: string;
   citations: Citation[];
   finalContextText: string;
-  retrievalCacheStatus: "hit" | "miss" | "bypassed";
+  retrievalCacheStatus: "hit" | "semantic_hit" | "miss" | "bypassed";
   stages: StageEvent[];
   limitations?: string[];
   scope: {
@@ -90,9 +105,21 @@ export interface QueryResponse {
     selectedChildChunks: Record<string, Json>[];
     expandedParentContexts: ParentContext[];
     citations: Citation[];
-    debugMetadata: Record<string, Json>;
+    debugMetadata: Record<string, Json> & Partial<CoverageMetadata>;
   };
 }
+export type ContextAllocation = {
+  documentId: string; originalFilename: string; parentChunkId: string; childChunkId: string;
+  rerankedRank: number; status: "INCLUDED" | "DUPLICATE_PARENT" | "CHILD_EXCEEDS_REMAINING_BUDGET";
+  childChars: number; parentChars: number; allocatedChars: number; parentTruncated: boolean;
+};
+export type CoverageMetadata = {
+  allocationStrategy: string; fusedCandidateCount: number; rerankedCandidateCount: number;
+  selectedChildChunkCount: number; expandedParentContextCount: number; representativeChildCount: number;
+  appliedBudgetChars: number; usedBudgetChars: number; reservedChildChars: number;
+  skippedDuplicateParentCount: number; skippedBudgetCount: number; trimmedParentCount: number;
+  allocations: ContextAllocation[];
+};
 export interface QueryEvent {
   type: "received" | "stage" | "message" | "completed" | "error";
   traceId: string;
@@ -108,4 +135,5 @@ export interface QueryTurn {
   events: QueryEvent[];
   response?: QueryResponse;
   error?: string;
+  historyTurnsSent?: number;
 }

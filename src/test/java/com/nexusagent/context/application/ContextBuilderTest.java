@@ -70,7 +70,7 @@ class ContextBuilderTest {
 
     @Test
     void trimsParentContextToCharacterBudget() {
-        ContextBuilder builder = builder(12);
+        ContextBuilder builder = builder(20);
         UUID documentId = UUID.randomUUID();
         UUID parentId = UUID.randomUUID();
         UUID childId = UUID.randomUUID();
@@ -83,12 +83,12 @@ class ContextBuilderTest {
         when(parentContextExpansionService.expand(List.of(candidate), RequestContext.defaults()))
                 .thenReturn(Mono.just(List.of(expanded(candidate, "Security policy parent context"))));
 
-        StepVerifier.create(builder.build("security policy", List.of(), 5, 12))
+        StepVerifier.create(builder.build("security policy", List.of(), 5, 20))
                 .assertNext(context -> {
                     assertThat(context.expandedParentContexts()).hasSize(1);
-                    assertThat(context.expandedParentContexts().get(0).text()).hasSize(12);
+                    assertThat(context.expandedParentContexts().get(0).text()).hasSize(20);
                     assertThat(context.expandedParentContexts().get(0).truncated()).isTrue();
-                    assertThat(context.debugMetadata().usedBudgetChars()).isEqualTo(12);
+                    assertThat(context.debugMetadata().usedBudgetChars()).isEqualTo(20);
                     assertThat(context.finalContextText()).contains("[truncated]");
                 })
                 .verifyComplete();
@@ -96,7 +96,7 @@ class ContextBuilderTest {
 
     @Test
     void trimsAroundMatchedChildChunkInsteadOfParentStart() {
-        ContextBuilder builder = builder(20);
+        ContextBuilder builder = builder(28);
         UUID documentId = UUID.randomUUID();
         UUID parentId = UUID.randomUUID();
         UUID childId = UUID.randomUUID();
@@ -112,11 +112,11 @@ class ContextBuilderTest {
         when(parentContextExpansionService.expand(List.of(candidate), RequestContext.defaults()))
                 .thenReturn(Mono.just(List.of(expanded(candidate, parentText, childStart, childEnd))));
 
-        StepVerifier.create(builder.build("security policy", List.of(), 5, 20))
+        StepVerifier.create(builder.build("security policy", List.of(), 5, 28))
                 .assertNext(context -> {
                     assertThat(context.expandedParentContexts()).hasSize(1);
                     assertThat(context.expandedParentContexts().get(0).text())
-                            .contains("SECURITY")
+                            .contains("SECURITY-POLICY-EVIDENCE")
                             .doesNotStartWith("prefix");
                     assertThat(context.expandedParentContexts().get(0).charStart()).isGreaterThan(0);
                     assertThat(context.finalContextText()).contains("SECURITY");
@@ -167,6 +167,51 @@ class ContextBuilderTest {
         StepVerifier.create(builder.build("security policy", List.of(), 5, 0))
                 .expectError(BadRequestException.class)
                 .verify();
+    }
+
+    @Test void fiveCompleteChildCitationsSurviveAndParentBudgetIsShared() {
+        var rows = java.util.stream.IntStream.range(0, 5).mapToObj(i -> ContextBudgetAllocatorTest.candidate(i + 1,
+                "apple-" + (2022 + i) + ".md", "a".repeat(3000), 1200, 1600, 100)).toList();
+        var ranked = rows.stream().map(ExpandedCandidateContext::rerankedCandidate).toList();
+        var fused = ranked.stream().map(RerankedCandidate::candidate).toList();
+        when(hybridRetrievalService.retrieve("compare years", List.of(), 5, RequestContext.defaults()))
+                .thenReturn(Mono.just(result("compare years", fused)));
+        when(reranker.rerank("compare years", fused)).thenReturn(ranked);
+        when(parentContextExpansionService.expand(ranked, RequestContext.defaults())).thenReturn(Mono.just(rows));
+        StepVerifier.create(builder(4000).build("compare years", List.of(), 5, 4000)).assertNext(context -> {
+            assertThat(context.selectedChildChunks()).hasSize(5);
+            assertThat(context.citations()).hasSize(5);
+            assertThat(context.debugMetadata().usedBudgetChars()).isEqualTo(4000);
+            assertThat(context.debugMetadata().reservedChildChars()).isEqualTo(2000);
+            assertThat(context.debugMetadata().skippedBudgetCount()).isZero();
+            assertThat(context.debugMetadata().trimmedParentCount()).isEqualTo(5);
+            assertThat(context.debugMetadata().allocationStrategy()).isEqualTo("child-first-v1");
+            for (int i = 0; i < 5; i++) {
+                var parent = context.expandedParentContexts().get(i);
+                var child = context.selectedChildChunks().get(i);
+                assertThat(parent.includedChars()).isEqualTo(800);
+                assertThat(parent.charStart()).isLessThanOrEqualTo(child.charStart());
+                assertThat(parent.charEnd()).isGreaterThanOrEqualTo(child.charEnd());
+                assertThat(context.citations().get(i).childChunkId()).isEqualTo(child.childChunkId());
+            }
+            assertThat(context.finalContextText()).contains("apple-2025.md", "[C5]");
+        }).verifyComplete();
+    }
+
+    @Test void budgetSmallerThanChildReturnsEmptyEvidenceAndExplicitReason() {
+        var row = ContextBudgetAllocatorTest.candidate(1, "too-large.md", "a".repeat(100), 20, 70, 0);
+        var ranked = List.of(row.rerankedCandidate());
+        var fused = ranked.stream().map(RerankedCandidate::candidate).toList();
+        when(hybridRetrievalService.retrieve("policy", List.of(), 5, RequestContext.defaults())).thenReturn(Mono.just(result("policy", fused)));
+        when(reranker.rerank("policy", fused)).thenReturn(ranked);
+        when(parentContextExpansionService.expand(ranked, RequestContext.defaults())).thenReturn(Mono.just(List.of(row)));
+        StepVerifier.create(builder(10).build("policy", List.of(), 5, 10)).assertNext(context -> {
+            assertThat(context.finalContextText()).isEmpty();
+            assertThat(context.citations()).isEmpty();
+            assertThat(context.selectedChildChunks()).isEmpty();
+            assertThat(context.debugMetadata().skippedBudgetCount()).isEqualTo(1);
+            assertThat(context.debugMetadata().allocations().get(0).status().name()).isEqualTo("CHILD_EXCEEDS_REMAINING_BUDGET");
+        }).verifyComplete();
     }
 
     private ContextBuilder builder(int maxBudgetChars) {

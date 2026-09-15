@@ -3,6 +3,7 @@ import { Code2, FileText } from "lucide-react";
 import { Empty, JsonView } from "../components/shared";
 import { lessons, stageData, type StageId } from "./learning";
 import type { Citation, ParentContext, QueryTurn } from "./types";
+import { ContextCoverage } from "./ContextCoverage";
 
 export function evidenceParts(parent: ParentContext, citation: Citation) {
   const start = Math.max(parent.charStart, citation.charStart), end = Math.min(parent.charEnd, citation.charEnd);
@@ -38,7 +39,7 @@ export function QueryInspector({ turn, stageId, citation, active, onCloseCitatio
             chunkIndex: citation.chunkIndex, childOffsets: `[${citation.charStart}, ${citation.charEnd})`, section: citation.sectionTitle ?? "未提供" }).map(([key, value]) => <div className="qa-fact-row" key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}
         </dl>
       </> : <>
-        <span className="qa-eyebrow">{stage ? `${stage.status} · ${stage.durationMs} ms · attempt ${stage.attempt}` : "未收到阶段记录"}</span>
+        <span className="qa-eyebrow">{stage ? stage.status === "skipped" ? "skipped · 未执行" : `${stage.status} · ${stage.durationMs} ms · attempt ${stage.attempt}` : "未收到阶段记录"}</span>
         <h2>{lesson.title}</h2><code className="qa-method">{lesson.method}</code>
         <div className="tabs" role="tablist" aria-label="问答步骤内容">{[["input", "输入范围"], ["output", "实际输出"], ["source", "源码职责"]].map(([id, name]) =>
           <button role="tab" key={id} aria-selected={tab === id} aria-controls="query-detail" onClick={() => setTab(id)}>{name}</button>)}</div>
@@ -46,10 +47,16 @@ export function QueryInspector({ turn, stageId, citation, active, onCloseCitatio
           {tab === "source" ? <><p className="note">静态源码映射 · 不是运行时调用栈或模型推理</p>
             <code className="qa-source">src/main/java/com/nexusagent/{lesson.file}</code><p>{lesson.why}</p></>
             : tab === "input" ? <JsonView value={turn ? { question: turn.request.question, scope: turn.request.scope, documentIds: turn.request.documentIds,
+                historyTurnsSent: turn.historyTurnsSent ?? 0, resolvedQuestion: turn.response?.queryResolution?.resolvedQuestion,
                 topK: turn.request.topK, contextBudgetChars: turn.request.contextBudgetChars, ...(turn.response ? { resolvedScope: turn.response.scope } : {}) } : null} />
               : output === undefined ? <Empty><Code2 /><p>{stage ? "阶段状态已记录，尚无可展示的输出" : "此步骤尚未执行"}</p></Empty>
-                : <><p className="note">{stage?.summary?.reason === "cache_reuse" ? "来自上下文缓存 · 本次未执行此阶段 · 已复查权限与证据"
-                  : turn?.response ? "最终授权响应中的阶段数据" : "实时阶段摘要 · 不含证据原文"}</p><JsonView value={output} /></>}
+                : <><p className="note">{stage?.summary?.reason === "cache_reuse" ? turn?.response?.retrievalCacheStatus === "semantic_hit"
+                  ? "来自上下文缓存源问题 · 本次未重新计算 · 历史检索与重排分数不属于本次问题"
+                  : "来自上下文缓存 · 本次未执行此阶段 · 已复查权限与证据"
+                  : turn?.response ? "最终授权响应中的阶段数据" : "实时阶段摘要 · 不含证据原文"}</p>
+                  {turn?.response && ["child_selection", "parent_expansion", "context_building"].includes(stageId)
+                    && <ContextCoverage response={turn.response} detail />}
+                  <JsonView value={output} /></>}
         </div>
         {tab !== "source" && <section className="explanation"><h3>职责</h3><p>{lesson.why}</p></section>}
       </>}

@@ -1,16 +1,16 @@
 package com.nexusagent.context.application;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.common.error.BadRequestException;
+import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.context.domain.Citation;
+import com.nexusagent.context.domain.ContextAllocation.Status;
 import com.nexusagent.context.domain.ContextBuildResult;
 import com.nexusagent.context.domain.ContextDebugMetadata;
 import com.nexusagent.context.domain.ExpandedCandidateContext;
@@ -18,25 +18,22 @@ import com.nexusagent.context.domain.ExpandedParentContext;
 import com.nexusagent.context.domain.RerankedCandidate;
 import com.nexusagent.context.domain.SelectedChildChunk;
 import com.nexusagent.retrieval.application.HybridRetrievalService;
+import com.nexusagent.retrieval.domain.HybridRetrievalResult;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 @Service
 public class ContextBuilder {
-
     private final HybridRetrievalService hybridRetrievalService;
     private final Reranker reranker;
     private final ParentContextExpansionService parentContextExpansionService;
     private final CitationFormatter citationFormatter;
     private final ContextProperties contextProperties;
+    private final ContextBudgetAllocator allocator = new ContextBudgetAllocator();
 
-    public ContextBuilder(
-            HybridRetrievalService hybridRetrievalService,
-            Reranker reranker,
-            ParentContextExpansionService parentContextExpansionService,
-            CitationFormatter citationFormatter,
-            ContextProperties contextProperties
-    ) {
+    public ContextBuilder(HybridRetrievalService hybridRetrievalService, Reranker reranker,
+                          ParentContextExpansionService parentContextExpansionService,
+                          CitationFormatter citationFormatter, ContextProperties contextProperties) {
         this.hybridRetrievalService = hybridRetrievalService;
         this.reranker = reranker;
         this.parentContextExpansionService = parentContextExpansionService;
@@ -44,250 +41,90 @@ public class ContextBuilder {
         this.contextProperties = contextProperties;
     }
 
-    public Mono<ContextBuildResult> build(
-            String query,
-            List<UUID> documentIds,
-            Integer topK,
-            Integer requestedContextBudgetChars
-    ) {
-        return build(query, documentIds, topK, requestedContextBudgetChars, RequestContext.defaults());
+    public Mono<ContextBuildResult> build(String query, List<UUID> documentIds, Integer topK, Integer budget) {
+        return build(query, documentIds, topK, budget, RequestContext.defaults());
     }
 
-    public Mono<ContextBuildResult> build(
-            String query,
-            List<UUID> documentIds,
-            Integer topK,
-            Integer requestedContextBudgetChars,
-            RequestContext context
-    ) {
+    public Mono<ContextBuildResult> build(String query, List<UUID> documentIds, Integer topK,
+                                          Integer budget, RequestContext context) {
+        return buildInternal(query, documentIds, topK, budget, context, null);
+    }
+
+    public Mono<ContextBuildResult> buildWithEmbedding(String query, List<UUID> documentIds, Integer topK,
+                                                      Integer budget, RequestContext context, EmbeddingVector embedding) {
+        java.util.Objects.requireNonNull(embedding, "Precomputed query embedding is required");
+        return buildInternal(query, documentIds, topK, budget, context, embedding);
+    }
+
+    private Mono<ContextBuildResult> buildInternal(String query, List<UUID> documentIds, Integer topK,
+                                                   Integer requestedBudget, RequestContext context, EmbeddingVector embedding) {
         return Mono.defer(() -> {
-            RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
-            int contextBudgetChars = normalizeBudget(requestedContextBudgetChars);
-            List<UUID> normalizedDocumentIds = documentIds == null ? List.of() : List.copyOf(documentIds);
-            return hybridRetrievalService.retrieve(query, normalizedDocumentIds, topK, effectiveContext)
-                    .flatMap(retrievalResult -> StageObservation.observe("reranking",
-                            () -> Mono.fromSupplier(() -> reranker.rerank(
-                                retrievalResult.query(),
-                                retrievalResult.fusedCandidates()
-                        )), rows -> Map.of("candidateCount", rows.size(), "reranker", reranker.name()))
-                            .flatMap(rerankedCandidates -> StageObservation.observe("parent_expansion",
-                                    () -> parentContextExpansionService.expand(rerankedCandidates, effectiveContext),
-                                    rows -> Map.of("expandedCount", rows.size()))
-                                .flatMap(expandedCandidates -> StageObservation.observe("context_building",
-                                        () -> Mono.fromSupplier(() -> buildResult(
-                                        retrievalResult.query(),
-                                        retrievalResult.fusedCandidates().size(),
-                                        retrievalResult,
-                                        rerankedCandidates,
-                                        expandedCandidates,
-                                        contextBudgetChars
-                                )), result -> Map.of("parentCount", result.expandedParentContexts().size(),
-                                        "citationCount", result.citations().size(),
-                                        "formattedChars", result.finalContextText().length())))));
+            RequestContext access = context == null ? RequestContext.defaults() : context;
+            int budget = normalizeBudget(requestedBudget);
+            List<UUID> ids = documentIds == null ? List.of() : List.copyOf(documentIds);
+            var retrieved = embedding == null ? hybridRetrievalService.retrieve(query, ids, topK, access)
+                    : hybridRetrievalService.retrieveWithEmbedding(query, ids, topK, access, embedding);
+            return retrieved.flatMap(result -> StageObservation.observe("reranking",
+                    () -> Mono.fromSupplier(() -> reranker.rerank(result.query(), result.fusedCandidates())),
+                    rows -> Map.of("candidateCount", rows.size(), "reranker", reranker.name()))
+                    .flatMap(ranked -> StageObservation.observe("child_selection",
+                            () -> parentContextExpansionService.expand(ranked, access).map(rows -> allocator.select(rows, budget)),
+                            plan -> Map.of("candidateCount", ranked.size(), "selectedChildCount",
+                                    plan.decisions().stream().filter(d -> d.status() == Status.INCLUDED).count(),
+                                    "reservedChildChars", plan.reservedChars(), "strategy", ContextBudgetAllocator.VERSION))
+                        .flatMap(plan -> StageObservation.observe("parent_expansion",
+                                () -> Mono.fromSupplier(() -> allocator.expand(plan)),
+                                windows -> Map.of("expandedCount", windows.size(), "usedBudgetChars",
+                                        windows.stream().mapToInt(w -> w.end() - w.start()).sum()))
+                            .flatMap(windows -> StageObservation.observe("context_building",
+                                    () -> Mono.fromSupplier(() -> buildResult(result, ranked, plan, windows)),
+                                    built -> Map.of("parentCount", built.expandedParentContexts().size(),
+                                            "citationCount", built.citations().size(), "skippedBudgetCount", built.debugMetadata().skippedBudgetCount(),
+                                            "formattedChars", built.finalContextText().length()))))));
         });
     }
 
-    private ContextBuildResult buildResult(
-            String query,
-            int fusedCandidateCount,
-            com.nexusagent.retrieval.domain.HybridRetrievalResult retrievalResult,
-            List<RerankedCandidate> rerankedCandidates,
-            List<ExpandedCandidateContext> expandedCandidates,
-            int contextBudgetChars
-    ) {
-        Selection selection = selectParentContexts(expandedCandidates, contextBudgetChars);
-        String finalContextText = citationFormatter.formatContext(
-                selection.parentContexts(),
-                selection.citations()
-        );
-        return new ContextBuildResult(
-                query,
-                rerankedCandidates,
-                selection.selectedChildChunks(),
-                selection.parentContexts(),
-                selection.citations(),
-                finalContextText,
-                new ContextDebugMetadata(
-                        reranker.name(),
-                        fusedCandidateCount,
-                        rerankedCandidates.size(),
-                        selection.selectedChildChunks().size(),
-                        selection.parentContexts().size(),
-                        contextBudgetChars,
-                        selection.usedBudgetChars(),
-                        selection.skippedDuplicateParentCount(),
-                        selection.skippedBudgetCount()
-                ),
-                retrievalResult
-        );
-    }
-
-    private Selection selectParentContexts(
-            List<ExpandedCandidateContext> expandedCandidates,
-            int contextBudgetChars
-    ) {
-        List<SelectedChildChunk> selectedChildChunks = new ArrayList<>();
-        List<ExpandedParentContext> parentContexts = new ArrayList<>();
-        List<Citation> citations = new ArrayList<>();
-        Set<UUID> selectedParentIds = new HashSet<>();
-        int usedBudgetChars = 0;
-        int skippedDuplicateParentCount = 0;
-        int skippedBudgetCount = 0;
-
-        for (ExpandedCandidateContext expandedCandidate : expandedCandidates) {
-            if (selectedParentIds.contains(expandedCandidate.parentChunk().id())) {
-                skippedDuplicateParentCount++;
-                continue;
-            }
-
-            int remainingBudget = contextBudgetChars - usedBudgetChars;
-            if (remainingBudget <= 0) {
-                skippedBudgetCount++;
-                continue;
-            }
-
-            ParentTextSelection parentTextSelection = selectParentText(expandedCandidate, remainingBudget);
-
-            selectedParentIds.add(expandedCandidate.parentChunk().id());
-            usedBudgetChars += parentTextSelection.text().length();
-
-            int citationIndex = citations.size() + 1;
-            citations.add(citationFormatter.citation(citationIndex, expandedCandidate));
-            selectedChildChunks.add(selectedChildChunk(expandedCandidate, citationIndex, parentTextSelection.truncated()));
-            parentContexts.add(new ExpandedParentContext(
-                    expandedCandidate.parentChunk().id(),
-                    expandedCandidate.document().id(),
-                    expandedCandidate.document().originalFilename(),
-                    expandedCandidate.parentChunk().chunkIndex(),
-                    parentTextSelection.charStart(),
-                    parentTextSelection.charEnd(),
-                    parentTextSelection.text(),
-                    parentTextSelection.truncated(),
-                    parentTextSelection.text().length(),
-                    List.of(expandedCandidate.childChunk().id())
-            ));
+    private ContextBuildResult buildResult(HybridRetrievalResult retrieval, List<RerankedCandidate> ranked,
+                                           ContextBudgetAllocator.Plan plan, List<ContextBudgetAllocator.Window> windows) {
+        var children = new ArrayList<SelectedChildChunk>();
+        var parents = new ArrayList<ExpandedParentContext>();
+        var citations = new ArrayList<Citation>();
+        for (var window : windows) {
+            var candidate = window.candidate();
+            var parent = candidate.parentChunk();
+            String text = parent.text().substring(window.start(), window.end());
+            boolean trimmed = text.length() < parent.text().length();
+            int index = citations.size() + 1;
+            citations.add(citationFormatter.citation(index, candidate));
+            children.add(selectedChildChunk(candidate, index, trimmed));
+            parents.add(new ExpandedParentContext(parent.id(), candidate.document().id(), candidate.document().originalFilename(),
+                    parent.chunkIndex(), parent.charStart() + window.start(), parent.charStart() + window.end(), text,
+                    trimmed, text.length(), List.of(candidate.childChunk().id())));
         }
-
-        return new Selection(
-                selectedChildChunks,
-                parentContexts,
-                citations,
-                usedBudgetChars,
-                skippedDuplicateParentCount,
-                skippedBudgetCount
-        );
+        var allocations = allocator.diagnostics(plan, windows);
+        int duplicates = (int) allocations.stream().filter(a -> a.status() == Status.DUPLICATE_PARENT).count();
+        int skipped = (int) allocations.stream().filter(a -> a.status() == Status.CHILD_EXCEEDS_REMAINING_BUDGET).count();
+        return new ContextBuildResult(retrieval.query(), ranked, children, parents, citations,
+                citationFormatter.formatContext(parents, citations),
+                new ContextDebugMetadata(reranker.name(), retrieval.fusedCandidates().size(), ranked.size(), children.size(), parents.size(),
+                        plan.budget(), parents.stream().mapToInt(ExpandedParentContext::includedChars).sum(), duplicates, skipped,
+                        ContextBudgetAllocator.VERSION, allocations.size() - duplicates, plan.reservedChars(),
+                        (int) parents.stream().filter(ExpandedParentContext::truncated).count(), allocations), retrieval);
     }
 
-    private ParentTextSelection selectParentText(ExpandedCandidateContext expandedCandidate, int budgetChars) {
-        String parentText = expandedCandidate.parentChunk().text();
-        if (parentText.length() <= budgetChars) {
-            return new ParentTextSelection(
-                    parentText,
-                    false,
-                    expandedCandidate.parentChunk().charStart(),
-                    expandedCandidate.parentChunk().charEnd()
-            );
-        }
-
-        int parentLength = parentText.length();
-        int childRelativeStart = clamp(
-                expandedCandidate.childChunk().charStart() - expandedCandidate.parentChunk().charStart(),
-                0,
-                parentLength
-        );
-        int childRelativeEnd = clamp(
-                expandedCandidate.childChunk().charEnd() - expandedCandidate.parentChunk().charStart(),
-                childRelativeStart,
-                parentLength
-        );
-        int snippetStart = childCenteredStart(parentLength, childRelativeStart, childRelativeEnd, budgetChars);
-        int snippetEnd = Math.min(snippetStart + budgetChars, parentLength);
-
-        return new ParentTextSelection(
-                parentText.substring(snippetStart, snippetEnd),
-                true,
-                expandedCandidate.parentChunk().charStart() + snippetStart,
-                expandedCandidate.parentChunk().charStart() + snippetEnd
-        );
+    private SelectedChildChunk selectedChildChunk(ExpandedCandidateContext candidate, int index, boolean trimmed) {
+        var child = candidate.childChunk();
+        var ranked = candidate.rerankedCandidate();
+        return new SelectedChildChunk(child.id(), candidate.parentChunk().id(), candidate.document().id(),
+                candidate.document().originalFilename(), child.chunkIndex(), child.charStart(), child.charEnd(),
+                ranked.candidate().previewText(), ranked.candidate().source(), ranked.rerankedRank(), ranked.rerankScore(),
+                "Selected complete child for citation [C%d]; %s%s".formatted(index, ranked.reason(),
+                        trimmed ? "; parent fairly expanded within context budget" : ""));
     }
 
-    private int childCenteredStart(int parentLength, int childStart, int childEnd, int budgetChars) {
-        int maxStart = Math.max(parentLength - budgetChars, 0);
-        int childLength = Math.max(childEnd - childStart, 0);
-        int start;
-
-        if (childLength >= budgetChars) {
-            start = childStart;
-        } else {
-            int childCenter = childStart + (childLength / 2);
-            start = childCenter - (budgetChars / 2);
-            if (start > childStart) {
-                start = childStart;
-            }
-            if (start + budgetChars < childEnd) {
-                start = childEnd - budgetChars;
-            }
-        }
-
-        return clamp(start, 0, maxStart);
-    }
-
-    private int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(value, max));
-    }
-
-    private SelectedChildChunk selectedChildChunk(
-            ExpandedCandidateContext expandedCandidate,
-            int citationIndex,
-            boolean parentWasTruncated
-    ) {
-        String reason = "Selected for citation [C%d]; %s%s"
-                .formatted(
-                        citationIndex,
-                        expandedCandidate.rerankedCandidate().reason(),
-                        parentWasTruncated ? "; parent trimmed to fit context budget" : ""
-                );
-        return new SelectedChildChunk(
-                expandedCandidate.childChunk().id(),
-                expandedCandidate.parentChunk().id(),
-                expandedCandidate.document().id(),
-                expandedCandidate.document().originalFilename(),
-                expandedCandidate.childChunk().chunkIndex(),
-                expandedCandidate.childChunk().charStart(),
-                expandedCandidate.childChunk().charEnd(),
-                expandedCandidate.rerankedCandidate().candidate().previewText(),
-                expandedCandidate.rerankedCandidate().candidate().source(),
-                expandedCandidate.rerankedCandidate().rerankedRank(),
-                expandedCandidate.rerankedCandidate().rerankScore(),
-                reason
-        );
-    }
-
-    private int normalizeBudget(Integer requestedContextBudgetChars) {
-        if (requestedContextBudgetChars == null) {
-            return contextProperties.getDefaultBudgetChars();
-        }
-        if (requestedContextBudgetChars < 1) {
-            throw new BadRequestException("contextBudgetChars must be greater than 0");
-        }
-        return Math.min(requestedContextBudgetChars, contextProperties.getMaxBudgetChars());
-    }
-
-    private record Selection(
-            List<SelectedChildChunk> selectedChildChunks,
-            List<ExpandedParentContext> parentContexts,
-            List<Citation> citations,
-            int usedBudgetChars,
-            int skippedDuplicateParentCount,
-            int skippedBudgetCount
-    ) {
-    }
-
-    private record ParentTextSelection(
-            String text,
-            boolean truncated,
-            int charStart,
-            int charEnd
-    ) {
+    private int normalizeBudget(Integer requested) {
+        if (requested == null) { return contextProperties.getDefaultBudgetChars(); }
+        if (requested < 1) { throw new BadRequestException("contextBudgetChars must be greater than 0"); }
+        return Math.min(requested, contextProperties.getMaxBudgetChars());
     }
 }

@@ -342,6 +342,17 @@ class QueryOrchestrationServiceTest {
         );
     }
 
+    @Test
+    void offlineQueriesRejectHistoryInsteadOfPretendingToSupportFollowUps() {
+        var service = service(new LocalTemplateAnswerGenerator(), Duration.ofSeconds(5));
+        var request = new QueryRequest("s", "What about it?", List.of(), 5, 1000, false, "library",
+                List.of(new com.nexusagent.query.api.ConversationTurn("Prior topic?", "Prior answer", false)));
+        StepVerifier.create(service.execute(request)).expectErrorSatisfies(error ->
+                assertThat(((com.nexusagent.common.error.OperationException) error).code()).isEqualTo("MULTI_TURN_UNAVAILABLE")).verify();
+        StepVerifier.create(service.stream(request, "trace", RequestContext.defaults())).expectErrorSatisfies(error ->
+                assertThat(((com.nexusagent.common.error.OperationException) error).code()).isEqualTo("MULTI_TURN_UNAVAILABLE")).verify();
+    }
+
     private QueryOrchestrationService service(AnswerGenerator generator, Duration contextTimeout) {
         QueryProperties properties = new QueryProperties();
         properties.setContextTimeout(contextTimeout);

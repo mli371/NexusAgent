@@ -22,7 +22,7 @@ import reactor.core.publisher.Mono;
 public class RedisRetrievalCacheService implements RetrievalCacheService {
 
     private static final Logger log = LoggerFactory.getLogger(RedisRetrievalCacheService.class);
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final ReactiveStringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;

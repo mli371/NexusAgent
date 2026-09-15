@@ -15,7 +15,7 @@ import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
 
 public class RedisKeyFactory {
 
-    private static final String CACHE_SCHEMA = "context-cache-v2";
+    private static final String CACHE_SCHEMA = "context-cache-v3-" + com.nexusagent.context.application.ContextBudgetAllocator.VERSION;
     private final EmbeddingModelInfo embeddingModel;
 
     public RedisKeyFactory() {

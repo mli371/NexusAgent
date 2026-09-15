@@ -43,11 +43,11 @@ final class RedisLiveContextCache implements LiveContextCache {
             }
             Envelope value = mapper.readerFor(Envelope.class)
                     .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readValue(json);
-            if (value.schemaVersion() != 1 || !key.equals(value.cacheKey()) || value.cachedAt() == null
+            if (value.schemaVersion() != 2 || !key.equals(value.cacheKey()) || value.cachedAt() == null
                     || value.cachedAt().isAfter(Instant.now())
                     || value.cachedAt().plus(properties.getLiveCacheTtl()).isBefore(Instant.now())
                     || value.context() == null) { return new Lookup(null, "invalid_entry"); }
-            return new Lookup(value.context(), "found");
+            return new Lookup(value.context(), "found", fingerprint(value.context()), value.cachedAt().plus(properties.getLiveCacheTtl()));
         } catch (Exception ignored) {
             // Jackson messages may include evidence text. Never log the exception or raw JSON.
             return new Lookup(null, "invalid_entry");
@@ -55,21 +55,34 @@ final class RedisLiveContextCache implements LiveContextCache {
     }
 
     public Mono<Void> put(String key, ContextBuildResult context) {
-        return Mono.defer(() -> {
+        return putWithReceipt(key, context).then();
+    }
+
+    public Mono<Stored> putWithReceipt(String key, ContextBuildResult context) {
+        return Mono.<Stored>defer(() -> {
             if (context.finalContextText().isBlank() || context.citations().isEmpty()) { return Mono.empty(); }
-            return Mono.fromCallable(() -> mapper.writeValueAsString(new Envelope(1, key, Instant.now(), withQuery(context, ""))))
+            Instant createdAt = Instant.now();
+            return Mono.fromCallable(() -> mapper.writeValueAsString(new Envelope(2, key, createdAt, withQuery(context, ""))))
                     .flatMap(json -> {
                         int bytes = json.getBytes(StandardCharsets.UTF_8).length;
                         if (bytes > properties.getLiveCacheMaxBytes()) {
                             log.info("live_context_cache_write_skipped key={} reason=oversized bytes={}", key, bytes);
                             return Mono.empty();
                         }
-                        return redis.opsForValue().set(key, json, properties.getLiveCacheTtl()).then();
+                        return redis.opsForValue().set(key, json, properties.getLiveCacheTtl())
+                                .filter(Boolean.TRUE::equals)
+                                .flatMap(ignored -> Mono.fromCallable(() -> new Stored(key, fingerprint(context),
+                                        createdAt.plus(properties.getLiveCacheTtl()))));
                     });
         }).timeout(properties.getLiveCacheTimeout()).onErrorResume(error -> {
             log.warn("live_context_cache_write_failed key={} errorType={}", key, error.getClass().getSimpleName());
             return Mono.empty();
         });
+    }
+
+    private String fingerprint(ContextBuildResult context) throws com.fasterxml.jackson.core.JsonProcessingException {
+        return LiveContextCacheKey.hash(mapper.writer().with(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+                .writeValueAsBytes(withQuery(context, "")));
     }
 
     static ContextBuildResult withQuery(ContextBuildResult context, String query) {

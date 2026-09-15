@@ -21,8 +21,16 @@ public record QueryResponse(
         String answerProvider,
         String answerModel,
         List<QueryStageEvent> stages,
-        QueryScopeSummary scope
+        QueryScopeSummary scope,
+        QueryResolutionDebug queryResolution
 ) {
+    public QueryResponse(String traceId, String answer, List<Citation> citations, String finalContextText,
+                         RetrievalDebugResponse retrievalDebug, ContextDebugResponse contextDebug,
+                         List<String> limitations, String retrievalCacheStatus, String answerStatus,
+                         String answerProvider, String answerModel, List<QueryStageEvent> stages, QueryScopeSummary scope) {
+        this(traceId, answer, citations, finalContextText, retrievalDebug, contextDebug, limitations, retrievalCacheStatus,
+                answerStatus, answerProvider, answerModel, stages, scope, null);
+    }
     public QueryResponse(String traceId, String answer, List<Citation> citations, String finalContextText,
                          RetrievalDebugResponse retrievalDebug, ContextDebugResponse contextDebug,
                          List<String> limitations, String retrievalCacheStatus) {

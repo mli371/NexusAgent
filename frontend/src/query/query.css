@@ -105,6 +105,15 @@
   .qa-workspace .inspector { grid-column: auto; height: 100%; }
   .qa-workspace .inspect-body { height: calc(100% - 62px); }
 }
+.qa-coverage { margin-top: 12px; border-top: 1px solid var(--border, #dbe5e2); padding-top: 10px; min-width: 0; overflow-wrap: anywhere; }
+.qa-coverage-summary { font-size: 12px; line-height: 1.7; color: #26594e; margin: 0 0 4px; }
+.qa-coverage .note { font-size: 11px; line-height: 1.7; margin: 4px 0 8px; }
+.qa-allocation { padding: 10px 0; border-bottom: 1px solid var(--border, #dbe5e2); font-size: 12px; min-width: 0; }
+.qa-allocation summary { cursor: pointer; line-height: 1.7; }
+.qa-allocation summary > span { display: block; color: #5c706a; font-size: 11px; }
+.qa-allocation p { margin: 4px 0; }
+.qa-allocation code { font-size: 10px; overflow-wrap: anywhere; }
+.qa-allocation .qa-evidence { margin: 8px 0; }
 @media (max-width: 600px) {
   .app-modes { padding: 0 12px; }
   .app-modes > span { display: none; }

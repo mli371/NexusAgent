@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.embeddings.application.EmbeddingService;
+import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.embeddings.repository.VectorSearchRepository;
 import com.nexusagent.retrieval.domain.SemanticRetrievalCandidate;
 import org.springframework.stereotype.Service;
@@ -37,10 +38,24 @@ public class SemanticRetrievalService {
             int topK,
             RequestContext context
     ) {
+        return retrieveInternal(query, null, documentIds, topK, context);
+    }
+
+    public Flux<SemanticRetrievalCandidate> retrieveWithEmbedding(String query, EmbeddingVector embedding,
+                                                                 List<UUID> documentIds, int topK, RequestContext context) {
+        java.util.Objects.requireNonNull(embedding, "Precomputed query embedding is required");
+        return retrieveInternal(query, embedding, documentIds, topK, context);
+    }
+
+    private Flux<SemanticRetrievalCandidate> retrieveInternal(String query, EmbeddingVector precomputed,
+                                                             List<UUID> documentIds, int topK, RequestContext context) {
         return Flux.defer(() -> {
             AtomicInteger rank = new AtomicInteger(1);
-            return StageObservation.observe("query_embedding", () -> embeddingService.embed(query),
+            var vector = precomputed == null
+                    ? StageObservation.observe("query_embedding", () -> embeddingService.embed(query),
                             ignored -> Map.of("model", embeddingService.modelInfo().modelName()))
+                    : reactor.core.publisher.Mono.fromSupplier(() -> embeddingService.requireExpectedDimension(precomputed));
+            return vector
                 .flatMapMany(embedding -> StageObservation.observe("vector_search",
                         () -> vectorSearchRepository.search(embedding, documentIds, topK, context).collectList(),
                         rows -> Map.of("candidateCount", rows.size())).flatMapMany(Flux::fromIterable))

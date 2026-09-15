@@ -7,6 +7,7 @@ import java.util.UUID;
 import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.common.error.BadRequestException;
+import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.retrieval.domain.HybridRetrievalResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +46,17 @@ public class HybridRetrievalService {
             Integer requestedTopK,
             RequestContext context
     ) {
+        return retrieveInternal(query, documentIds, requestedTopK, context, null);
+    }
+
+    public Mono<HybridRetrievalResult> retrieveWithEmbedding(String query, List<UUID> documentIds, Integer topK,
+                                                            RequestContext context, EmbeddingVector embedding) {
+        java.util.Objects.requireNonNull(embedding, "Precomputed query embedding is required");
+        return retrieveInternal(query, documentIds, topK, context, embedding);
+    }
+
+    private Mono<HybridRetrievalResult> retrieveInternal(String query, List<UUID> documentIds, Integer requestedTopK,
+                                                        RequestContext context, EmbeddingVector embedding) {
         return Mono.defer(() -> {
             RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
             String normalizedQuery = normalizeQuery(query);
@@ -52,12 +64,8 @@ public class HybridRetrievalService {
             int topK = normalizeTopK(requestedTopK);
 
             return Mono.zip(
-                            semanticRetrievalService.retrieve(
-                                    normalizedQuery,
-                                    normalizedDocumentIds,
-                                    topK,
-                                    effectiveContext
-                            ).collectList(),
+                            (embedding == null ? semanticRetrievalService.retrieve(normalizedQuery, normalizedDocumentIds, topK, effectiveContext)
+                                    : semanticRetrievalService.retrieveWithEmbedding(normalizedQuery, embedding, normalizedDocumentIds, topK, effectiveContext)).collectList(),
                             fullTextRetrievalService.retrieve(
                                     normalizedQuery,
                                     normalizedDocumentIds,

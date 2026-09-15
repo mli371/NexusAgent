@@ -88,7 +88,7 @@ class LiveContextCacheTest {
         var json = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(values).set(eq("key"), json.capture(), eq(Duration.ofMinutes(15)));
         var value = mapper.readTree(json.getValue());
-        assertThat(value.path("schemaVersion").asInt()).isEqualTo(1);
+        assertThat(value.path("schemaVersion").asInt()).isEqualTo(2);
         assertThat(value.at("/context/query").asText()).isEmpty();
         assertThat(value.path("context").has("answer")).isFalse();
         when(values.get("key")).thenReturn(Mono.just(json.getValue()));
@@ -98,8 +98,9 @@ class LiveContextCacheTest {
     @Test
     void rejectsMalformedWrongKeyExpiredAndOversizedEntries() throws Exception {
         for (String json : List.of("private-corrupt-body", "x".repeat(131073),
-                mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, "wrong-key", Instant.now(), evidence)),
-                mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, "key", Instant.now().minusSeconds(1000), evidence)),
+                mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, "key", Instant.now(), evidence)),
+                mapper.writeValueAsString(new RedisLiveContextCache.Envelope(2, "wrong-key", Instant.now(), evidence)),
+                mapper.writeValueAsString(new RedisLiveContextCache.Envelope(2, "key", Instant.now().minusSeconds(1000), evidence)),
                 mapper.writeValueAsString(new RedisLiveContextCache.Envelope(99, "key", Instant.now(), evidence)))) {
             when(values.get("key")).thenReturn(Mono.just(json));
             assertThat(cache.get("key").block().context()).isNull();
@@ -130,7 +131,7 @@ class LiveContextCacheTest {
     @Test
     void validHitSkipsBuilderAndChecksEvidenceAndVersion() throws Exception {
         String key = key(input, versions, model);
-        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, key, Instant.now(), evidence))));
+        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(2, key, Instant.now(), evidence))));
         assertThat(load().block().cacheStatus()).isEqualTo("hit");
         verifyNoInteractions(builder);
         verify(guard).evidence(any(), any());
@@ -142,10 +143,10 @@ class LiveContextCacheTest {
         String key = key(input, versions, model);
         var tampered = new ContextBuildResult(evidence.query(), evidence.rerankedCandidates(), evidence.selectedChildChunks(),
                 evidence.expandedParentContexts(), evidence.citations(), "unrelated evidence", evidence.debugMetadata());
-        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, key, Instant.now(), tampered))));
+        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(2, key, Instant.now(), tampered))));
         assertThat(load().block().cacheStatus()).isEqualTo("miss");
         clearInvocations(builder);
-        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(1, key, Instant.now(), evidence))));
+        when(values.get(key)).thenReturn(Mono.just(mapper.writeValueAsString(new RedisLiveContextCache.Envelope(2, key, Instant.now(), evidence))));
         when(guard.evidence(any(), any())).thenReturn(Mono.error(new com.nexusagent.common.error.OperationException(
                 org.springframework.http.HttpStatus.NOT_FOUND, "DOCUMENT_NOT_ACCESSIBLE", "Denied")));
         StepVerifier.create(load()).expectError(com.nexusagent.common.error.OperationException.class).verify();

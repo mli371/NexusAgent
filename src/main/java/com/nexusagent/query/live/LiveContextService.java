@@ -2,6 +2,8 @@ package com.nexusagent.query.live;
 
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.time.Instant;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexusagent.common.error.OperationException;
@@ -10,10 +12,14 @@ import com.nexusagent.context.application.CitationFormatter;
 import com.nexusagent.context.application.ContextBuilder;
 import com.nexusagent.context.domain.ContextBuildResult;
 import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
+import com.nexusagent.embeddings.domain.EmbeddingVector;
+import com.nexusagent.embeddings.application.EmbeddingService;
+import com.nexusagent.query.application.QueryProperties;
 import com.nexusagent.retrieval.application.RetrievalProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
 
 /** Cache-aside evidence reuse, never answer reuse. PostgreSQL remains the authority. */
 final class LiveContextService {
@@ -25,9 +31,19 @@ final class LiveContextService {
     private final EmbeddingModelInfo model;
     private final RetrievalProperties retrieval;
     private final ObjectMapper mapper;
+    private final EmbeddingService embeddings;
+    private final SemanticContextCache semantic;
+    private final QueryProperties properties;
+    private final SemanticReusePolicy policy = new SemanticReusePolicy();
 
     LiveContextService(ContextBuilder builder, LiveQueryGuard guard, LiveContextSnapshotRepository snapshots,
                        LiveContextCache cache, EmbeddingModelInfo model, RetrievalProperties retrieval, ObjectMapper mapper) {
+        this(builder, guard, snapshots, cache, model, retrieval, mapper, null, SemanticContextCache.disabled(), new QueryProperties());
+    }
+
+    LiveContextService(ContextBuilder builder, LiveQueryGuard guard, LiveContextSnapshotRepository snapshots,
+                       LiveContextCache cache, EmbeddingModelInfo model, RetrievalProperties retrieval, ObjectMapper mapper,
+                       EmbeddingService embeddings, SemanticContextCache semantic, QueryProperties properties) {
         this.builder = builder;
         this.guard = guard;
         this.snapshots = snapshots;
@@ -35,13 +51,17 @@ final class LiveContextService {
         this.model = model;
         this.retrieval = retrieval;
         this.mapper = mapper;
+        this.embeddings = embeddings;
+        this.semantic = semantic;
+        this.properties = properties;
     }
 
-    String mode() { return cache.enabled() ? "versioned_context" : "bypassed"; }
+    String mode() { return !cache.enabled() ? "bypassed" : semantic.enabled() ? "versioned_semantic_context" : "versioned_context"; }
 
     Mono<Result> load(LiveQueryInput input, QueryTrace trace) {
         if (!cache.enabled()) {
             trace.skipped("cache_lookup", "disabled");
+            trace.skipped("semantic_cache_lookup", "disabled");
             return fresh(input).map(context -> new Result(context, "bypassed", null));
         }
         return snapshots.read(input).flatMap(versions -> {
@@ -53,17 +73,84 @@ final class LiveContextService {
                         boolean hit = lookup.context() != null;
                         log.info("live_context_cache_lookup traceId={} status={} reason={}", input.traceId(), hit ? "hit" : "miss", lookup.reason());
                         if (hit) {
-                            for (String stage : List.of("query_embedding", "vector_search", "full_text_search", "rrf_fusion",
-                                    "reranking", "parent_expansion", "context_building")) {
-                                trace.skipped(stage, "cache_reuse");
-                            }
+                            trace.skipped("semantic_cache_lookup", "exact_cache_hit");
+                            trace.skipped("query_embedding", "cache_reuse");
+                            skipRetrieval(trace);
                             return snapshots.assertCurrent(input, versions)
                                     .thenReturn(new Result(lookup.context(), "hit", versions));
                         }
-                        return fresh(input).flatMap(context -> snapshots.assertCurrent(input, versions)
-                                .then(cache.put(key, context)).thenReturn(new Result(context, "miss", versions)));
+                        return afterExactMiss(input, versions, key, trace);
                     });
         });
+    }
+
+    private Mono<Result> afterExactMiss(LiveQueryInput input, List<LiveContextSnapshotRepository.DocumentVersion> versions,
+                                       String key, QueryTrace trace) {
+        var features = policy.features(input.question());
+        if (!semantic.enabled() || features.isEmpty()) {
+            trace.skipped("semantic_cache_lookup", semantic.enabled() ? "ineligible_query" : "disabled");
+            return buildAndStore(input, versions, key, null, null);
+        }
+        String scope = LiveContextCacheKey.semanticScope(input, versions, model, retrieval, mapper);
+        return StageObservation.observe("query_embedding", () -> embeddings.embed(input.question())
+                        .switchIfEmpty(Mono.error(OperationException.invalidModelResponse())),
+                        ignored -> Map.of("model", model.modelName()))
+                .flatMap(vector -> StageObservation.observe("semantic_cache_lookup",
+                                () -> semanticLookup(input, scope, features.get(), vector), this::semanticSummary)
+                        .flatMap(selection -> {
+                            log.info("semantic_context_cache_lookup traceId={} status={} reason={}", input.traceId(),
+                                    selection.context() == null ? "miss" : "semantic_hit", selection.reason());
+                            if (selection.context() == null) {
+                                return buildAndStore(input, versions, key, vector, features.get());
+                            }
+                            skipRetrieval(trace);
+                            return snapshots.assertCurrent(input, versions)
+                                    .thenReturn(new Result(selection.context(), "semantic_hit", versions));
+                        }));
+    }
+
+    private Mono<Selection> semanticLookup(LiveQueryInput input, String scope, SemanticReusePolicy.Features features, EmbeddingVector vector) {
+        return semantic.read(scope, model.dimension()).flatMap(read -> {
+            var ranking = policy.rank(features, vector.values(), read.sources(), properties.getSemanticCacheMinSimilarity());
+            return Flux.fromIterable(ranking.matches()).concatMap(match -> cache.get(match.source().cacheKey())
+                            .filter(value -> value.context() != null && match.source().expiresAt().isAfter(Instant.now())
+                                    && match.source().fingerprint().equals(value.fingerprint()) && value.expiresAt() != null
+                                    && !match.source().expiresAt().isAfter(value.expiresAt()))
+                            .flatMap(value -> validateHit(input, value)).filter(value -> value.context() != null)
+                            .map(value -> new Selection(value.context(), "validated", match.similarity(), read.sources().size())))
+                    .next().defaultIfEmpty(new Selection(null, read.sources().isEmpty() ? read.reason()
+                            : ranking.matches().isEmpty() ? ranking.reason() : "invalid_source_evidence",
+                            ranking.bestSimilarity(), read.sources().size()));
+        });
+    }
+
+    private Map<String, Object> semanticSummary(Selection selection) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("cacheStatus", selection.context() == null ? "miss" : "semantic_hit");
+        summary.put("reason", selection.reason());
+        summary.put("threshold", properties.getSemanticCacheMinSimilarity());
+        summary.put("candidateCount", selection.candidateCount());
+        if (selection.similarity() != null) { summary.put("similarity", selection.similarity()); }
+        if (selection.context() != null) { summary.put("dataOrigin", "cached_source_query"); }
+        return Map.copyOf(summary);
+    }
+
+    private Mono<Result> buildAndStore(LiveQueryInput input, List<LiveContextSnapshotRepository.DocumentVersion> versions,
+                                      String key, EmbeddingVector vector, SemanticReusePolicy.Features features) {
+        return fresh(input, vector).flatMap(context -> snapshots.assertCurrent(input, versions)
+                .then(Mono.defer(() -> {
+                    if (vector == null || features == null) { return cache.put(key, context); }
+                    String scope = LiveContextCacheKey.semanticScope(input, versions, model, retrieval, mapper);
+                    return cache.putWithReceipt(key, context).flatMap(stored -> semantic.put(new SemanticContextCache.Source(
+                            1, scope, LiveContextCacheKey.hash(input.question()), vector.values(), features,
+                            stored.cacheKey(), stored.fingerprint(), Instant.now(), stored.expiresAt())));
+                })).thenReturn(new Result(context, "miss", versions)));
+    }
+
+    private void skipRetrieval(QueryTrace trace) {
+        for (String stage : List.of("vector_search", "full_text_search", "rrf_fusion", "reranking", "child_selection", "parent_expansion", "context_building")) {
+            trace.skipped(stage, "cache_reuse");
+        }
     }
 
     private Mono<LiveContextCache.Lookup> validateHit(LiveQueryInput input, LiveContextCache.Lookup lookup) {
@@ -107,7 +194,13 @@ final class LiveContextService {
     }
 
     private Mono<ContextBuildResult> fresh(LiveQueryInput input) {
-        return guard.access(input).then(Mono.defer(() -> builder.build(input.question(), input.documentIds(), input.topK(), input.budget(), input.context())))
+        return fresh(input, null);
+    }
+
+    private Mono<ContextBuildResult> fresh(LiveQueryInput input, EmbeddingVector vector) {
+        return guard.access(input).then(Mono.defer(() -> vector == null
+                        ? builder.build(input.question(), input.documentIds(), input.topK(), input.budget(), input.context())
+                        : builder.buildWithEmbedding(input.question(), input.documentIds(), input.topK(), input.budget(), input.context(), vector)))
                 .switchIfEmpty(Mono.error(LiveQueryGuard.changed()))
                 .flatMap(context -> guard.evidence(input, context).thenReturn(context));
     }
@@ -117,4 +210,5 @@ final class LiveContextService {
     }
 
     record Result(ContextBuildResult context, String cacheStatus, List<LiveContextSnapshotRepository.DocumentVersion> versions) { }
+    private record Selection(ContextBuildResult context, String reason, Double similarity, int candidateCount) { }
 }

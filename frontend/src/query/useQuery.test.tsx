@@ -40,3 +40,21 @@ it("keeps at most twelve turns and clears all previous evidence on denied access
   await act(() => result.current.submit(queryRequest, queryModel));
   expect(result.current.turns).toEqual([]); expect(result.current.error).toContain("已清空");
 });
+
+it("keeps history only in the outbound request and creates a new session on clear or identity change", async () => {
+  stream.mockImplementation(async (_api, _request, trace, _model, _signal, onEvent) => {
+    onEvent({ type: "completed", traceId: trace, response: queryResponse(trace) });
+  });
+  const { result, rerender } = renderHook(({ client }) => useQuery(client), { initialProps: { client: api } });
+  const session = result.current.sessionId;
+  const history = [{ question: "old", answer: "bounded", answerTruncated: false }];
+  await act(() => result.current.submit({ ...queryRequest, history }, queryModel));
+  expect(stream.mock.calls[0][1].history).toEqual(history);
+  expect(result.current.turns[0].request.history).toBeUndefined();
+  expect(result.current.turns[0].historyTurnsSent).toBe(1);
+  act(() => result.current.clear());
+  expect(result.current.sessionId).not.toBe(session); expect(result.current.turns).toEqual([]);
+  const secondSession = result.current.sessionId;
+  rerender({ client: new BackendClient({ tenantId: "other", actorId: "anonymous" }) });
+  expect(result.current.sessionId).not.toBe(secondSession); expect(result.current.turns).toEqual([]);
+});

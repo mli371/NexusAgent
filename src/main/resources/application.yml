@@ -97,10 +97,14 @@ nexus:
     answer-provider: ${NEXUS_ANSWER_PROVIDER:local}
     live-context-timeout: ${NEXUS_LIVE_CONTEXT_TIMEOUT:45s}
     state-timeout: ${NEXUS_QUERY_STATE_TIMEOUT:2s}
+    rewrite-timeout: ${NEXUS_QUERY_REWRITE_TIMEOUT:20s}
     live-cache-enabled: ${NEXUS_LIVE_CACHE_ENABLED:true}
     live-cache-ttl: ${NEXUS_LIVE_CACHE_TTL:15m}
     live-cache-timeout: ${NEXUS_LIVE_CACHE_TIMEOUT:500ms}
     live-cache-max-bytes: ${NEXUS_LIVE_CACHE_MAX_BYTES:131072}
+    semantic-cache-enabled: ${NEXUS_SEMANTIC_CACHE_ENABLED:true}
+    semantic-cache-min-similarity: ${NEXUS_SEMANTIC_CACHE_MIN_SIMILARITY:0.96}
+    semantic-cache-max-entries: ${NEXUS_SEMANTIC_CACHE_MAX_ENTRIES:100}
     context-timeout: ${NEXUS_QUERY_CONTEXT_TIMEOUT:20s}
     answer-timeout: ${NEXUS_QUERY_ANSWER_TIMEOUT:5s}
   storage:

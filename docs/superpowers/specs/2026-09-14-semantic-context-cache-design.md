@@ -1,6 +1,6 @@
 # 语义上下文缓存设计
 
-状态：用户已批准“现有 Redis + Java 有界相似度计算”方向；本文件待 review，尚未实现。
+状态：用户已 review 并批准，已按本设计实现。结果与验证见 [中文交付 review](../../review/semantic-context-cache.md)。
 
 ## 1. 目标与范围
 

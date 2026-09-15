@@ -11,6 +11,7 @@ import com.nexusagent.enterprise.audit.AuditService;
 import com.nexusagent.model.OpenAiHttpClient;
 import com.nexusagent.model.OpenAiProperties;
 import com.nexusagent.query.application.OpenAiAnswerGenerator;
+import com.nexusagent.query.application.OpenAiQuestionResolver;
 import com.nexusagent.query.application.QueryProperties;
 import com.nexusagent.query.application.SessionStateService;
 import com.nexusagent.query.application.ToolOutputStore;
@@ -64,7 +65,8 @@ public class LiveQueryConfiguration {
                                           ContextProperties contextProperties, ObjectMapper mapper,
                                           LiveContextSnapshotRepository snapshots, EmbeddingService embeddings,
                                           NexusRedisProperties redisProperties,
-                                          ObjectProvider<org.springframework.data.redis.core.ReactiveStringRedisTemplate> redis) {
+                                          ObjectProvider<org.springframework.data.redis.core.ReactiveStringRedisTemplate> redis,
+                                          OpenAiHttpClient client) {
             if (retrieval.getMaxTopK() < 1 || retrieval.getMaxTopK() > 50
                     || retrieval.getDefaultTopK() < 1 || retrieval.getDefaultTopK() > retrieval.getMaxTopK()
                     || contextProperties.getMaxBudgetChars() < 1 || contextProperties.getMaxBudgetChars() > 12000
@@ -74,9 +76,12 @@ public class LiveQueryConfiguration {
             }
             LiveContextCache cache = properties.isLiveCacheEnabled() && redisProperties.isEnabled()
                     ? new RedisLiveContextCache(redis.getObject(), mapper, properties) : LiveContextCache.disabled();
-            var cachedContexts = new LiveContextService(contexts, guard, snapshots, cache, embeddings.modelInfo(), retrieval, mapper);
+            SemanticContextCache semantic = cache.enabled() && properties.isSemanticCacheEnabled()
+                    ? new RedisSemanticContextCache(redis.getObject(), mapper, properties) : SemanticContextCache.disabled();
+            var cachedContexts = new LiveContextService(contexts, guard, snapshots, cache, embeddings.modelInfo(), retrieval, mapper,
+                    embeddings, semantic, properties);
             return new LiveQueryService(cachedContexts, answers, guard, sessions, tools, audit, properties,
-                    openAi, retrieval, contextProperties, mapper);
+                    openAi, retrieval, contextProperties, mapper, new OpenAiQuestionResolver(client, openAi, properties, mapper));
         }
     }
 }

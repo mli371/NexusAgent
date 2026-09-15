@@ -57,9 +57,9 @@ Coordinates the full context flow:
 
 1. call hybrid retrieval
 2. rerank fused candidates
-3. expand child hits to parent chunks
-4. deduplicate by `parent_chunk_id`
-5. apply `contextBudgetChars`
+3. load authorized parent/child records and deduplicate by `parent_chunk_id`
+4. reserve complete child evidence within `contextBudgetChars`
+5. distribute remaining characters across child-centered parent windows
 6. build selected children, parent contexts, citations, and final context text
 
 `CitationFormatter`
@@ -165,7 +165,9 @@ it is capped.
 
 The current budget is character-based, not model-token-based. This keeps the MVP deterministic and simple to test, but a production system should count tokens using the target model's tokenizer.
 
-If a parent chunk exceeds the remaining budget, it is trimmed and marked as `truncated`. The trim is child-centered: the builder uses the selected child chunk's global `charStart` and `charEnd` offsets to choose a window around the matched evidence instead of blindly taking the beginning of the parent chunk. This keeps the cited evidence visible in `finalContextText` whenever the budget is large enough to include at least part of that child span.
+The current `child-first-v1` hardening replaces greedy per-parent trimming. `ContextBudgetAllocator` reserves complete evidence for each unique parent's highest-ranked child before any parent expansion. Remaining space is shared equally among parents still needing context, redistributing space from short parents. Windows are centered around the matched child and marked `truncated` when shorter than the stored parent. Global offsets remain unchanged and the entire cited child must be visible, not just part of its span.
+
+If a complete child cannot fit in the remaining reservation budget, it is excluded with `CHILD_EXCEEDS_REMAINING_BUDGET`; later smaller candidates can still fit. Other children of the same parent remain `DUPLICATE_PARENT`. If none fit, no citations are created. Diagnostics distinguish reservations, actual window lengths, trimmed parents and skipped children. Characters follow Java/JavaScript UTF-16 indexing, not Unicode code points or model tokens. Newly created window edges avoid splitting surrogate pairs and may leave a small amount of budget unused. Citation formatting overhead remains outside the body budget. See the [current Chinese learning note](coverage-first-context.md).
 
 ## Citation Metadata
 

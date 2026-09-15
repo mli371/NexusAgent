@@ -41,4 +41,16 @@ class AnswerCitationValidatorTest {
                     LiveQueryServiceTest.evidence())).isInstanceOf(OperationException.class);
         }
     }
+
+    @Test void partiallyVisibleChildCannotBeCited() {
+        var original = LiveQueryServiceTest.evidence();
+        var parent = original.expandedParentContexts().get(0);
+        var shortened = new com.nexusagent.context.domain.ExpandedParentContext(parent.parentChunkId(), parent.documentId(),
+                parent.originalFilename(), parent.parentChunkIndex(), parent.charStart(), parent.charStart() + 1,
+                parent.text().substring(0, 1), true, 1, parent.childChunkIds());
+        var invalid = new ContextBuildResult(original.query(), original.rerankedCandidates(), original.selectedChildChunks(),
+                List.of(shortened), original.citations(), original.finalContextText(), original.debugMetadata());
+        assertThatThrownBy(() -> validator.validate(LiveQueryServiceTest.answer("Claim [C1]", List.of("[C1]")), invalid))
+                .isInstanceOf(OperationException.class);
+    }
 }

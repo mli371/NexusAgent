@@ -27,10 +27,12 @@ The separately reviewed real RAG extension includes provider preparation, an opt
 QueryController -> LiveQueryService
   -> input, tenant/owner access and current-model coverage checks
   -> library ready-document snapshot OR explicitly selected ready documents
+  -> question resolution: no history skips; bounded page history resolves a standalone question
+       -> ambiguous/refused: terminal response, no cache/retrieval/answer call
   -> LiveContextService: versioned, tenant/actor-scoped Redis context cache
   -> miss: existing ContextBuilder; hit: validate cached evidence and skip these stages
        -> (query embedding -> vector search) || full-text search
-       -> RRF -> heuristic rerank -> parent expansion -> character budget
+       -> RRF -> heuristic rerank -> complete child reservation -> fair parent expansion -> citations
   -> current evidence/access recheck
   -> OpenAI Responses adapter, or explicit abstention without an answer call
   -> citation subset validation, bounded status/audit/tool summaries
@@ -39,9 +41,13 @@ QueryController -> LiveQueryService
 
 An optional Reactor Context observer records actual stage boundaries without changing offline callers. REST and SSE subscribe to the same live pipeline once. Progress summaries omit raw evidence; the final authorized debug response contains retrieval/context details. V10 adds `documents.retrieval_revision` and transactional triggers for chunk/vector/access changes. Cache keys use a database version snapshot; evidence and versions are rechecked before model use and final output. Hits mark skipped stages as cache reuse, not newly executed stages. Live state keys include hashed tenant/actor/session or trace scope; Redis is still short-lived and best-effort. See the [current cache note](learning/live-context-cache-ci.md) and historical [Phase 2 note](learning/rag-02-live-query.md). There is no transaction held across a remote model call.
 
+`ContextBudgetAllocator` is pure, deterministic allocation logic shared by context callers through `ContextBuilder`. The `child_selection` boundary loads authorized parent/child records, verifies global offsets/text relationships, deduplicates parents and reserves complete child spans. `parent_expansion` water-fills remaining body characters across included parents and produces child-centered windows. `context_building` formats citations and bounded allocation diagnostics. The 4000-character default and 64 KiB external input limit are unchanged. Excluded children get no citation; included child offsets must fit entirely inside the returned parent window. The policy version also changes exact-cache keys and semantic-cache scopes. See [allocation design and trade-offs](learning/coverage-first-context.md).
+
 `QueryLibraryRepository` first filters documents by tenant and TENANT/owner visibility, then aggregates coverage against provider/model/dimension. It reads at most 201 visible IDs to detect the learning limit of 200 and refuses overflow. `LiveQueryGuard` excludes unready documents and passes the same nonempty ready-ID snapshot to both retrieval paths. The snapshot is not a long transaction or a new source of truth. Explicit mode retains the 1–10-document, all-ready contract.
 
-The React QA view issues one POST SSE request, checks trace/sequence/provider/citation associations, and withholds answer text until `completed`. It draws the known pipeline DAG using actual events and displays final authorized evidence separately from static source explanations. Only 12 turns live in memory; identity/view changes abort local work and clear data. This is single-turn RAG, not Pi tool-calling or a persistent conversation. See [Phase 3](learning/rag-03-learning-frontend.md).
+The React QA view issues one POST SSE request, checks trace/sequence/provider/citation associations, and withholds answer text until `completed`. It draws the known pipeline DAG using actual events and displays final authorized evidence separately from static source explanations. Only 12 displayed turns live in memory; the latest three completed answered turns can supply reference hints. Identity/view/scope/document-set changes, refresh and clear discard history and create a new session. It is bounded page-local RAG, not Pi tool-calling or a persistent conversation. See the [follow-up extension](learning/page-follow-up-resolution.md) and historical [Phase 3](learning/rag-03-learning-frontend.md).
+
+`ConversationTurn` validates bounded untrusted history. `OpenAiQuestionResolver` uses the existing nonblocking HTTP client and answer-model configuration for one strict JSON-schema response, with no tools, provider-side conversation or automatic retry. `LiveQueryService` preserves the original question for display/debug, then creates an effective input with the resolved question for exact/semantic cache lookup, embedding, retrieval, reranking and answer generation. History is not added to `LiveQueryInput`, cached context, audit metadata or the final answer prompt. Existing evidence/access/version checks remain in place. Debug-only `queryResolution` contains the original/resolved questions and finite status/reason metadata, not historical answers or model reasoning. Model ambiguity is a normal clarification response; timeout/malformed output is a safe error, not a guessed rewrite.
 
 ```text
 Client
@@ -407,6 +413,12 @@ com.nexusagent
 - Performance benchmarking and scale claims are intentionally out of scope until the system has realistic workloads and measurements.
 
 ## Future Updates
+
+### Bounded Semantic Context Reuse
+
+The live pipeline now checks exact context first, then optionally compares an eligible question embedding against up to 100 Redis source vectors within the same tenant/actor, resolved document revisions, parameters, model and policy scope. Java computes cosine similarity; no Redis Search, new database table, ANN index or LLM judge is added. A semantic miss forwards the already computed vector into normal hybrid retrieval. The shared evidence validator and PostgreSQL revision checks apply before generation and final release.
+
+Only fresh retrieval can register a source after a confirmed exact-cache write. Sources carry a fingerprint and an expiry no later than the original context; a semantic hit never creates a new source or exact alias. A single-key Lua operation bounds ZSET membership, removes expired sources and sets a positive bucket TTL; reading does not renew sources. Capacity is per scope, not a global Redis memory quota. Redis failures fall back, while access/database errors propagate. Similarity plus lexical guards is experimental and does not prove equivalent intent; see [implementation and limitations](learning/semantic-context-cache.md).
 
 ### Learning Workbench Boundary
 

@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { AnswerText, evidenceParts, QueryInspector } from "./QueryInspector";
 import { QueryFlow } from "./QueryFlow";
-import { citation, parent, queryEvents, queryRequest, queryResponse, traceId } from "../test/queryFixtures";
+import { citation, parent, queryEvents, queryRequest, queryResponse, semanticResponse, traceId } from "../test/queryFixtures";
 import type { QueryTurn } from "./types";
 
 it("uses global exclusive UTF-16 offsets to highlight the child inside a trimmed parent", () => {
@@ -40,4 +40,17 @@ it("labels reused stages as not executed and identifies cached candidate data", 
   expect(container.querySelector('[data-stage="vector_search"]')).toHaveTextContent("缓存复用未执行");
   expect(container.querySelector('[data-stage="vector_search"]')).not.toHaveTextContent("0 ms");
   expect(screen.getByText(/来自上下文缓存/)).toBeVisible();
+});
+
+it("shows semantic similarity without hiding the embedding call or relabeling historical scores", () => {
+  const response = semanticResponse();
+  const turn: QueryTurn = { traceId, request: queryRequest, status: "completed", response, events: queryEvents(response) };
+  const { container, rerender } = render(<><QueryFlow turn={turn} selection="semantic_cache_lookup" onSelect={vi.fn()} active />
+    <QueryInspector turn={turn} stageId="semantic_cache_lookup" active onCloseCitation={vi.fn()} /></>);
+  expect(container.querySelector('[data-stage="semantic_cache_lookup"]')).toHaveTextContent("语义命中");
+  expect(container.querySelector('[data-stage="query_embedding"]')).toHaveAttribute("data-state", "succeeded");
+  expect(container.querySelector('[data-stage="vector_search"]')).toHaveTextContent("缓存复用未执行");
+  expect(container.querySelector("#query-detail")).toHaveTextContent('"similarity": 0.98');
+  rerender(<QueryInspector turn={turn} stageId="reranking" active onCloseCitation={vi.fn()} />);
+  expect(screen.getByText(/历史检索与重排分数不属于本次问题/)).toBeVisible();
 });

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -83,7 +84,7 @@ class RedisRetrievalCacheServiceTest {
         assertThat(storedKey.get()).endsWith(":candidates");
         assertThat(storedTtl.get()).isEqualTo(redisProperties.getRetrievalCacheTtl());
         assertThat(storedTtl.get()).isGreaterThan(Duration.ZERO);
-        assertThat(storedJson.get()).contains("\"schemaVersion\":1");
+        assertThat(storedJson.get()).contains("\"schemaVersion\":2");
 
         StepVerifier.create(cache.get(key()))
                 .assertNext(result -> {
@@ -91,6 +92,15 @@ class RedisRetrievalCacheServiceTest {
                     assertThat(result.finalContextText()).contains("Security policy");
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void ignoresEntriesWrittenBeforeCoverageFirstAllocation() throws Exception {
+        String legacyJson = objectMapper.writeValueAsString(
+                new RedisRetrievalCacheService.CachedContextEnvelope(1, Instant.now(), context()));
+        when(valueOperations.get(anyString())).thenReturn(Mono.just(legacyJson));
+
+        StepVerifier.create(service().get(key())).verifyComplete();
     }
 
     @Test

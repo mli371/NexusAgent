@@ -12,10 +12,39 @@ public class QueryProperties {
     private String answerProvider = "local";
     private Duration liveContextTimeout = Duration.ofSeconds(45);
     private Duration stateTimeout = Duration.ofSeconds(2);
+    private Duration rewriteTimeout = Duration.ofSeconds(20);
     private boolean liveCacheEnabled = true;
     private Duration liveCacheTtl = Duration.ofMinutes(15);
     private Duration liveCacheTimeout = Duration.ofMillis(500);
     private int liveCacheMaxBytes = 131072;
+    private boolean semanticCacheEnabled = true;
+    private double semanticCacheMinSimilarity = 0.96;
+    private int semanticCacheMaxEntries = 100;
+
+    public Duration getRewriteTimeout() { return rewriteTimeout; }
+    public void setRewriteTimeout(Duration timeout) {
+        if (timeout == null || timeout.isZero() || timeout.isNegative() || timeout.compareTo(Duration.ofSeconds(60)) > 0) {
+            throw new IllegalArgumentException("Query rewrite timeout must be positive and at most 60 seconds");
+        }
+        this.rewriteTimeout = timeout;
+    }
+
+    public boolean isSemanticCacheEnabled() { return semanticCacheEnabled; }
+    public void setSemanticCacheEnabled(boolean enabled) { this.semanticCacheEnabled = enabled; }
+    public double getSemanticCacheMinSimilarity() { return semanticCacheMinSimilarity; }
+    public void setSemanticCacheMinSimilarity(double similarity) {
+        if (!Double.isFinite(similarity) || similarity <= 0 || similarity > 1) {
+            throw new IllegalArgumentException("Semantic cache similarity must be finite and in (0, 1]");
+        }
+        this.semanticCacheMinSimilarity = similarity;
+    }
+    public int getSemanticCacheMaxEntries() { return semanticCacheMaxEntries; }
+    public void setSemanticCacheMaxEntries(int entries) {
+        if (entries < 1 || entries > 200) {
+            throw new IllegalArgumentException("Semantic cache entries must be 1 to 200 per scope");
+        }
+        this.semanticCacheMaxEntries = entries;
+    }
 
     public boolean isLiveCacheEnabled() { return liveCacheEnabled; }
     public void setLiveCacheEnabled(boolean enabled) { this.liveCacheEnabled = enabled; }

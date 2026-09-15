@@ -25,6 +25,8 @@ See the [Chinese fix, tests and live-check note](learning/rag-answer-citation-va
 ## Live Context Cache
 
 - `retrievalCacheMode=bypassed`: confirm both `NEXUS_REDIS_ENABLED` and `NEXUS_LIVE_CACHE_ENABLED`. Capabilities reports configured mode, not connectivity.
+- `versioned_context` means exact-only; `versioned_semantic_context` additionally enables semantic lookup. An older process needs restarting to load the new code/configuration. `NEXUS_SEMANTIC_CACHE_ENABLED=false` disables only semantic reuse.
+- A paraphrase can legitimately miss: inspect `semantic_cache_lookup` reason, similarity and threshold in debug mode. `ineligible_query` means the lexical policy could not identify a supported simple intent; `below_threshold` is not a provider error. `invalid_source_evidence` means the original context disappeared, changed or failed evidence checks. Do not lower the threshold simply to produce a green demo.
 - Repeated `miss`: check `live_context_cache_lookup` reason and safe Redis read/write logs. Empty results and oversized values are deliberately not cached. New ready documents, identity/settings changes, re-chunking or vector updates change the key.
 - `invalid_evidence` / `stale_evidence`: the cached result was rejected and context is rebuilt. Do not disable access/version checks to force hits.
 - `DOCUMENT_CHANGED`: evidence/version changed during the request. No automatic model retry; resubmission may incur another model charge.

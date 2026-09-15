@@ -248,6 +248,10 @@ public class QueryOrchestrationService {
     }
 
     private QueryInput normalize(QueryRequest request, String traceId, RequestContext context) {
+        if (request != null && request.history() != null && !request.history().isEmpty()) {
+            throw new com.nexusagent.common.error.OperationException(org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "MULTI_TURN_UNAVAILABLE", "Page follow-up history requires the live query pipeline");
+        }
         if (request.question() == null || request.question().isBlank()) {
             throw new BadRequestException("question must not be blank");
         }
