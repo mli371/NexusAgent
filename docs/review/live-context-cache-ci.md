@@ -12,7 +12,7 @@
 
 | 检查 | 结果 |
 | --- | --- |
-| Maven clean verify | 305 项通过，0 失败，0 跳过；生成可执行 JAR |
+| Maven clean verify | 307 项通过，0 失败，0 跳过；生成可执行 JAR |
 | worker npm test | 26 项通过 |
 | 前端 npm test | 40 项通过 |
 | 前端 build | TypeScript 与 Vite 构建通过 |
@@ -21,6 +21,8 @@
 
 模型为测试 transport；PostgreSQL/PgVector 与 Redis 使用真实隔离容器，含主动停止测试 Redis 后问答继续成功。浏览器用合成 HTTP。未新增真实付费问答，也未迁移既有文档向量。
 第一次本地 clean 卡在旧 target 目录的文件系统读取，已终止该次构建，将旧产物保留在忽略的 logs 目录；随后干净构建完整通过。既有 Netty/macOS DNS 和测试容器关闭告警不属于本次修复。
+
+首轮 GitHub Actions 前端通过，后端暴露 Java 17 长段落正则栈溢出。已简化 DOTALL 下的多余正则分支，保留原分段语义；新增长段落全局偏移/父子关系回归测试和单换行/空行边界测试。回归测试修复前失败、修复后在 `-Xss256k` 下通过，随后本地完整 307 项通过。远端重新运行，不通过跳过测试或增大线程栈掩盖失败。
 
 ## 保留边界
 

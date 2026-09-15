@@ -86,3 +86,5 @@ npm run test:e2e --prefix frontend
 ## CI
 
 [GitHub Actions 配置与边界](../ci.md)运行同一套可重复测试，不使用私人 API key，不自动部署。测试通过证明所测行为，不等于生产可靠性、答案质量或性能指标。
+
+首轮远端 CI 在 Java 17 上发现长段落分割的 `StackOverflowError`。原正则的 `(?:.|\\R)*?` 在 DOTALL 模式下有多余分支，会逐字符递归；改为 `.*?` 后仍保留原段落边界规则。新增约 24 万字符的回归测试，验证父子关系、document-global chunk_index 和全局字符偏移，并在 `-Xss256k` 下通过。没有增加线程栈或跳过测试来掩盖问题，也不会自动重新分割既有文档。

@@ -15,7 +15,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class ParentChildChunker {
 
-    private static final Pattern PARAGRAPH_PATTERN = Pattern.compile("\\S(?:.|\\R)*?(?=(?:\\R\\s*\\R)|\\z)", Pattern.DOTALL);
+    // DOTALL already includes line breaks; an alternation here recurses for every character.
+    private static final Pattern PARAGRAPH_PATTERN = Pattern.compile("\\S.*?(?=(?:\\R\\s*\\R)|\\z)", Pattern.DOTALL);
 
     private final ChunkingProperties properties;
 

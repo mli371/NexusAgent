@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import com.nexusagent.chunking.domain.ParentChildChunkPlan;
 import org.junit.jupiter.api.Test;
@@ -90,6 +91,43 @@ class ParentChildChunkerTest {
                 .allSatisfy(parent -> assertThat(parent.text().length()).isLessThanOrEqualTo(120));
         assertThat(plan.parentChunks().get(0).charStart()).isEqualTo(0);
         assertThat(plan.parentChunks().get(plan.parentChunks().size() - 1).charEnd()).isLessThanOrEqualTo(text.length());
+    }
+
+    @Test
+    void largeParagraphPreservesOffsetsAndGlobalChildOrderWithoutRecursiveMatching() {
+        String text = "Policies require review. ".repeat(10_000).stripTrailing();
+
+        ParentChildChunkPlan plan = chunker(1200, 400, 80).chunk(text);
+
+        assertThat(plan.parentChunks()).hasSizeGreaterThan(100).allSatisfy(parent -> {
+            assertThat(parent.text()).hasSizeLessThanOrEqualTo(1200)
+                    .isEqualTo(text.substring(parent.charStart(), parent.charEnd()));
+        });
+        assertThat(plan.parentChunks().get(0).charStart()).isZero();
+        assertThat(plan.parentChunks().get(plan.parentChunks().size() - 1).charEnd()).isEqualTo(text.length());
+        assertThat(plan.childChunks()).allSatisfy(child -> {
+            var parent = plan.parentChunks().stream()
+                    .filter(candidate -> candidate.id().equals(child.parentChunkId())).findFirst().orElseThrow();
+            assertThat(child.charStart()).isGreaterThanOrEqualTo(parent.charStart());
+            assertThat(child.charEnd()).isLessThanOrEqualTo(parent.charEnd());
+            assertThat(child.text()).hasSizeLessThanOrEqualTo(400)
+                    .isEqualTo(text.substring(child.charStart(), child.charEnd()));
+        });
+        assertThat(plan.childChunks()).extracting(child -> child.chunkIndex())
+                .containsExactlyElementsOf(IntStream.range(0, plan.childChunks().size()).boxed().toList());
+    }
+
+    @Test
+    void keepsSingleNewlinesWithinParagraphsAndSplitsOnBlankLines() {
+        String first = "First line\ncontinued line";
+        String second = "Second paragraph\ncontinued text";
+        String text = "  " + first + "\n \t\n" + second + "\n";
+
+        ParentChildChunkPlan plan = chunker(35, 20, 5).chunk(text);
+
+        assertThat(plan.parentChunks()).extracting(parent -> parent.text()).containsExactly(first, second);
+        assertThat(plan.parentChunks()).allSatisfy(parent ->
+                assertThat(parent.text()).isEqualTo(text.substring(parent.charStart(), parent.charEnd())));
     }
 
     private ParentChildChunker chunker(int parentMaxChars, int childMaxChars, int childOverlapChars) {
