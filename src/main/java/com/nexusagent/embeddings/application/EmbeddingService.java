@@ -32,6 +32,14 @@ public class EmbeddingService {
                             .formatted(embedding.dimension(), expectedDimension)
             );
         }
+        double normSquared = 0;
+        for (Float value : embedding.values()) {
+            if (value == null || !Float.isFinite(value)) {
+                throw com.nexusagent.common.error.OperationException.invalidModelResponse();
+            }
+            normSquared += (double) value * value;
+        }
+        if (!(normSquared > 0)) { throw com.nexusagent.common.error.OperationException.invalidModelResponse(); }
         return embedding;
     }
 }

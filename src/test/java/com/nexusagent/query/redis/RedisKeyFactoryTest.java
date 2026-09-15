@@ -133,4 +133,18 @@ class RedisKeyFactoryTest {
         assertThat(properties.getToolOutputTtl()).isEqualTo(Duration.ofHours(2));
         assertThat(properties.getQueryStatusTtl()).isEqualTo(Duration.ofMinutes(30));
     }
+
+    @Test
+    void modelProviderAndDimensionChangeCacheKeys() {
+        QueryCacheKey key = new QueryCacheKey("tenant-a", "actor-a", "policy", List.of(), 5, 1000);
+        var retrieval = new RetrievalProperties();
+        var context = new ContextProperties();
+        List<com.nexusagent.embeddings.domain.EmbeddingModelInfo> models = List.of(
+                new com.nexusagent.embeddings.domain.EmbeddingModelInfo("local", "hash", 384),
+                new com.nexusagent.embeddings.domain.EmbeddingModelInfo("openai", "hash", 384),
+                new com.nexusagent.embeddings.domain.EmbeddingModelInfo("openai", "text-embedding-3-small", 384),
+                new com.nexusagent.embeddings.domain.EmbeddingModelInfo("openai", "text-embedding-3-small", 1536));
+        assertThat(models.stream().map(model -> new RedisKeyFactory(model).retrievalCandidates(key, retrieval, context)))
+                .doesNotHaveDuplicates();
+    }
 }

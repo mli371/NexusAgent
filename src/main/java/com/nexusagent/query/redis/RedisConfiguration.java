@@ -9,7 +9,7 @@ import org.springframework.context.annotation.Configuration;
 public class RedisConfiguration {
 
     @Bean
-    RedisKeyFactory redisKeyFactory() {
-        return new RedisKeyFactory();
+    RedisKeyFactory redisKeyFactory(com.nexusagent.embeddings.application.EmbeddingService embeddingService) {
+        return new RedisKeyFactory(embeddingService.modelInfo());
     }
 }

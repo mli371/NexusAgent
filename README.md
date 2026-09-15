@@ -27,11 +27,72 @@ Implemented milestones:
 
 The project still does not implement production LLM answer generation, production-grade enterprise security, or a full autonomous agent platform.
 
+## Real RAG Extension: Phases 1–3
+
+**Provider preparation, opt-in live REST/SSE answers, and the two-scope learning frontend are implemented.** See the [Phase 3 Chinese review](docs/review/rag-phase-3.md) and [learning/startup guide](docs/learning/rag-03-learning-frontend.md). Offline backend mode remains the default; adding a key alone does not activate live answers. The new chat view refuses offline/template mode.
+
+- Optional nonblocking OpenAI embedding provider: `text-embedding-3-small`, explicitly 384 dimensions. Local hash embeddings remain the default for offline use.
+- Embedding status and vector search distinguish provider/model/dimension. Equal dimensions do not make two models compatible.
+- `POST /api/v1/documents/{id}/embed?replaceExisting=true` explicitly replaces vectors without changing chunks. Ordinary embed and Pi EMBED_MISSING cannot overwrite another model. Rebuild generation happens outside a short atomic database commit.
+- `NEXUS_ANSWER_PROVIDER=openai` plus `NEXUS_EMBEDDINGS_PROVIDER=openai` enables `LiveQueryService` at `/api/v1/query` and `/api/v1/query/stream`. It uses the configured OpenAI Responses model (default `gpt-5.6-luna`), not Pi tool dispatch.
+- Default `scope=library` searches all accessible documents fully embedded with the current model and returns excluded-document reason counts. The learning implementation supports up to 200 accessible documents; beyond that it explicitly rejects the request instead of silently truncating. Optional `scope=documents` restricts search to 1–10 selected documents, all required to be ready. Both search paths receive the same tenant/owner-filtered snapshot. An empty ready library returns 409 before any model call.
+- The pipeline rechecks access before model egress and final output; selected unready documents return 409, inaccessible documents 404. It never automatically chunks, embeds or approves writes.
+- The live pipeline validates citation markers and returns only used citations. Empty evidence produces an explicit insufficient-context answer without an answer-model call; provider failures never fall back to templates.
+- Live SSE stages come from actual service boundaries. Search branches remain parallel. A validated answer is emitted once as `message`, not artificial token chunks. Debug-only evidence is withheld until the final access check.
+- `GET /api/v1/query/capabilities` reports configured mode without exposing credentials or probing account availability. Automated verification uses synthetic model responses and isolated PostgreSQL, not paid OpenAI calls. Existing vectors are not automatically migrated.
+- Live queries now use an optional, versioned Redis context cache (15-minute TTL, 128 KiB default cap). Keys include tenant/actor, resolved document revisions, query and retrieval settings. Hits revalidate evidence/access and still call the answer model; no final answers are cached. State/tool summaries remain hash/count-only. The separate old offline cache retains incomplete document-version invalidation. See [Chinese cache learning note](docs/learning/live-context-cache-ci.md).
+
+GitHub Actions runs backend/worker tests and builds, plus frontend unit/browser tests and builds on pushes and pull requests. Model responses are synthetic in CI; no private `.env` or live API keys are needed. This is CI and build-artifact delivery, not automatic deployment. See [CI guide](docs/ci.md).
+
+Real embedding sends child text to OpenAI and incurs API usage. Do not enable it on sensitive documents without appropriate permission. Keep keys only in the ignored `.env`; provider setup and explicit rebuild commands are in the learning note.
+
+## Optional Agent Harness: Diagnostics and Approval
+
+The retrieval MVP and the separate, disabled-by-default diagnostic extension serve different workflows. The extension adds durable runs at `POST /api/v1/agent/runs`. Java owns access checks, task state, tool execution, and report validation; a separate TypeScript worker uses the pinned Pi SDK for two read-only tools and `propose_retry`. Phase 2 adds actor-bound human approvals for ordinary CHUNK or EMBED_MISSING. The model cannot execute these writes, run shell commands, or approve itself. Java executes only the stored approved action after rechecking access and document state.
+
+- `inspect_document`: current chunk/embedding coverage and supported-format checks.
+- `list_ingestion_jobs`: latest ten job summaries without raw error messages.
+- PostgreSQL stores runs, scoped document IDs, tool observations, and ordered events. Redis is not required by this extension.
+- Explicit `X-Tenant-Id` and `X-Actor-Id` are required for these new APIs. They are still unverified demo headers, not authentication.
+- `scripted` mode executes the same HTTP/tool protocol without a model and labels every run accordingly. `pi` mode requires your own local provider configuration and API key.
+- Scripted end-to-end validation is implemented. **Live Pi/provider smoke test: PASS with OpenAI `gpt-5.6-luna`**, covering both tools and a persisted report; see [scope and evidence](docs/verification/agent-harness-gpt-5.6-luna.md). This is not a model-quality benchmark. `/agent/query` remains the older deterministic example; `/query` can independently opt into the live RAG pipeline above.
+- Phase 2: one immutable action per human approval, exact ingestion job linkage, stale-state checks, duplicate suppression and fresh-session continuation.
+- Phase 3: bounded read-only lease recovery, conservative reconciliation of uncertain writes, cancellation coordination, and replayable GET SSE using PostgreSQL event sequences. A cancellation request is not a rollback guarantee. The earlier live smoke test covered read-only Phase 1, not Phase 2/3 model-driven acceptance.
+
+See [setup and approval demo](docs/agent-harness.md#human-approval-demo-phase-2), [Phase 1 learning note](docs/learning/agent-harness-01-diagnostics.md), [Phase 2 learning note](docs/learning/agent-harness-02-approval-retry.md), and [Phase 3 review in Chinese](docs/review/agent-harness-phase-3.md). Waiting releases the model session; continuation and recovery preserve cumulative budgets. The learning workbench below now supports browser-based document processing. Login remains out of scope.
+
+Build the worker before Java tests to include the cross-process smoke tests:
+
+```bash
+npm --prefix workers/pi-worker ci --ignore-scripts
+npm --prefix workers/pi-worker test
+mvn test
+```
+
+For Docker Engine versions rejecting the test client's default API version, use `mvn -Dapi.version=1.44 test`. This is a test-client compatibility setting, not a production deployment change.
+
+## Learning Workbench
+
+`frontend/` is a React/TypeScript learning client with two views. **Knowledge QA** is the default: whole-library or selected-document scope, real stage DAG (including parallel retrieval), final retrieval/context data, and clickable citations highlighting the child inside the returned parent fragment. **Document processing** retains Pi tasks and human approvals. Static source explanations are separate from actual events; neither view exposes model reasoning, credentials or a full method trace.
+
+With the updated live-query backend on port 8080 (Pi worker is only needed for document processing):
+
+```bash
+npm --prefix frontend ci --ignore-scripts
+npm --prefix frontend run dev
+```
+
+Open **http://127.0.0.1:5173/**. Use Node 22.22.2 or newer. Restart an older backend to load the new query scopes/capabilities. This phase needs no new database migration. Configuration readiness is not proof of working API credentials.
+
+The browser uses demo tenant/actor headers, not login. Upload a TXT/Markdown fixture from **Documents and preparation**, then use the processing view to propose and manually approve CHUNK/EMBED_MISSING. Model-mismatched vectors require a separately confirmed rebuild; queries never migrate them automatically. QA is single-turn, keeps at most 12 turns in page memory and clears them on identity/view changes. A POST stream is never automatically resubmitted after disconnection. Sending a question requires acknowledgement of external context transmission and possible API charges.
+
+See the [current Chinese startup guide](docs/learning-workbench.md), [QA review](docs/review/rag-phase-3.md), and [eight-document synthetic corpus](examples/learning-corpus/README.md). Corpus notes distinguish public product facts from fictional business rules; do not upload the review-answer guide as evidence. Automated browser QA tests use synthetic HTTP responses; backend integration tests use isolated PostgreSQL and stub model transport. A subsequent [citation-validation fix and bounded live check](docs/learning/rag-answer-citation-validation-fix.md) used two explicitly authorized real queries: one reproduced a citation-set mismatch, and one passed through the real browser/SSE path with four citations after the fix. This is a smoke check, not a semantic-quality benchmark or broad provider acceptance.
+
 ## Why It Is More Than A Chatbot
 
 NexusAgent is a retrieval backend, not a thin chat wrapper. The project models the full data path that an enterprise assistant needs before answer generation can be trusted: raw file storage, metadata persistence, deterministic text extraction, parent-child chunking, child-only embeddings, hybrid retrieval, RRF fusion, reranking, parent context expansion, citation metadata, Redis-backed short-lived state/cache, SSE progress events, and a deterministic Plan-Execute-Critique workflow.
 
-The answer generator is intentionally local and simple. The engineering value is in the backend retrieval and orchestration pipeline, plus clear extension points for real providers later.
+The default answer generator is intentionally local and simple. The opt-in live query pipeline now uses real provider adapters with readiness, access and citation checks. Neither mode implies production answer quality or a completed retrieval-quality evaluation.
 
 ## Architecture Diagram
 

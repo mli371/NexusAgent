@@ -153,18 +153,10 @@ class RetrievalRepositoryIntegrationTest {
                                 now
                         ))
                         .then(EMBEDDING_PROVIDER.embed("security policy access"))
-                        .flatMapMany(queryEmbedding -> vectorSearchRepository.search(
-                                queryEmbedding,
-                                List.of(includedDocumentId),
-                                5
-                        ))
-                        .collectList()
-                        .zipWith(fullTextSearchRepository.search(
-                                        "security policy",
-                                        List.of(includedDocumentId),
-                                        5
-                                )
-                                .collectList()))
+                        // Both readers must subscribe only after the fixtures have committed.
+                        .flatMap(queryEmbedding -> Mono.zip(
+                                vectorSearchRepository.search(queryEmbedding, List.of(includedDocumentId), 5).collectList(),
+                                fullTextSearchRepository.search("security policy", List.of(includedDocumentId), 5).collectList())))
                 .assertNext(results -> {
                     assertThat(results.getT1()).isNotEmpty();
                     assertThat(results.getT1()).allSatisfy(result ->

@@ -28,7 +28,11 @@ public class ChunkRepository {
 
     @Transactional
     public Mono<ChunkedDocument> replaceChunks(UUID documentId, ParentChildChunkPlan plan, OffsetDateTime createdAt) {
-        return deleteByDocumentId(documentId)
+        // Embedding commits acquire this same lock; no model request runs while it is held.
+        return databaseClient.sql("SELECT id FROM documents WHERE id = :id FOR UPDATE")
+                .bind("id", documentId).fetch().first()
+                .switchIfEmpty(Mono.error(new com.nexusagent.common.error.NotFoundException("Document not found")))
+                .then(deleteByDocumentId(documentId))
                 .thenMany(Flux.fromIterable(plan.parentChunks()))
                 .concatMap(parent -> insertParent(documentId, parent, createdAt))
                 .thenMany(Flux.fromIterable(plan.childChunks()))

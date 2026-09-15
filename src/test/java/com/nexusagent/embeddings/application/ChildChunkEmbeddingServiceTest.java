@@ -2,7 +2,6 @@ package com.nexusagent.embeddings.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -25,9 +24,9 @@ import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentVisibility;
 import com.nexusagent.documents.repository.DocumentRepository;
-import com.nexusagent.embeddings.domain.ChildChunkEmbedding;
 import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
+import com.nexusagent.embeddings.domain.EmbeddingCoverage;
 import com.nexusagent.embeddings.repository.ChildChunkEmbeddingRepository;
 import com.nexusagent.enterprise.audit.AuditService;
 import com.nexusagent.enterprise.ingestion.IngestionJobService;
@@ -51,6 +50,7 @@ class ChildChunkEmbeddingServiceTest {
     private IngestionJobService ingestionJobService;
     private AuditService auditService;
     private ChildChunkEmbeddingService service;
+    private EmbeddingWriteService writer;
 
     @BeforeEach
     void setUp() {
@@ -60,6 +60,8 @@ class ChildChunkEmbeddingServiceTest {
         embeddingRepository = mock(ChildChunkEmbeddingRepository.class);
         ingestionJobService = mock(IngestionJobService.class);
         auditService = mock(AuditService.class);
+        writer = mock(EmbeddingWriteService.class);
+        lenient().when(writer.commit(any(), any(), any(), any(), any(Boolean.class), any())).thenReturn(Mono.empty());
         lenient().when(ingestionJobService.run(any(), any(), any(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(3));
         lenient().when(auditService.record(any(), any(), any(), any(), any(), any(), any()))
@@ -71,7 +73,8 @@ class ChildChunkEmbeddingServiceTest {
                 embeddingRepository,
                 ingestionJobService,
                 auditService,
-                FIXED_CLOCK
+                FIXED_CLOCK,
+                writer
         );
 
         when(embeddingService.modelInfo()).thenReturn(MODEL_INFO);
@@ -93,9 +96,8 @@ class ChildChunkEmbeddingServiceTest {
         when(embeddingRepository.findEmbeddedChildChunkIds(documentId)).thenReturn(Flux.empty());
         when(embeddingService.embed("security policy")).thenReturn(Mono.just(VECTOR));
         when(embeddingService.embed("access review")).thenReturn(Mono.just(VECTOR));
-        when(embeddingRepository.upsert(any(), eq(VECTOR), eq(MODEL_INFO), eq(FIXED_TIME)))
-                .thenAnswer(invocation -> Mono.just(embeddingFor(invocation.getArgument(0))));
-        when(embeddingRepository.countByDocumentId(documentId)).thenReturn(Mono.just(2L));
+        when(embeddingRepository.coverage(documentId, MODEL_INFO))
+                .thenReturn(Mono.just(new EmbeddingCoverage(2, 0, 0)), Mono.just(new EmbeddingCoverage(2, 2, 2)));
 
         StepVerifier.create(service.embedDocument(documentId))
                 .assertNext(status -> {
@@ -109,8 +111,10 @@ class ChildChunkEmbeddingServiceTest {
         verify(embeddingService).embed("security policy");
         verify(embeddingService).embed("access review");
         verify(embeddingService, never()).embed("Parent context should not be embedded");
-        verify(embeddingRepository).upsert(firstChild, VECTOR, MODEL_INFO, FIXED_TIME);
-        verify(embeddingRepository).upsert(secondChild, VECTOR, MODEL_INFO, FIXED_TIME);
+        verify(writer).commit(chunks, List.of(new EmbeddingWriteService.PendingEmbedding(firstChild, VECTOR)),
+                MODEL_INFO, RequestContext.defaults(), false, FIXED_TIME);
+        verify(writer).commit(chunks, List.of(new EmbeddingWriteService.PendingEmbedding(secondChild, VECTOR)),
+                MODEL_INFO, RequestContext.defaults(), false, FIXED_TIME);
     }
 
     @Test
@@ -124,9 +128,8 @@ class ChildChunkEmbeddingServiceTest {
         when(chunkRepository.findByDocumentId(documentId)).thenReturn(Mono.just(chunks));
         when(embeddingRepository.findEmbeddedChildChunkIds(documentId)).thenReturn(Flux.just(firstChild.id()));
         when(embeddingService.embed("needs embedding")).thenReturn(Mono.just(VECTOR));
-        when(embeddingRepository.upsert(eq(secondChild), eq(VECTOR), eq(MODEL_INFO), eq(FIXED_TIME)))
-                .thenReturn(Mono.just(embeddingFor(secondChild)));
-        when(embeddingRepository.countByDocumentId(documentId)).thenReturn(Mono.just(2L));
+        when(embeddingRepository.coverage(documentId, MODEL_INFO))
+                .thenReturn(Mono.just(new EmbeddingCoverage(2, 1, 1)), Mono.just(new EmbeddingCoverage(2, 2, 2)));
 
         StepVerifier.create(service.embedDocument(documentId))
                 .assertNext(status -> assertThat(status.complete()).isTrue())
@@ -155,6 +158,19 @@ class ChildChunkEmbeddingServiceTest {
         verify(embeddingRepository, never()).upsert(any(), any(), any(), any());
     }
 
+    @Test
+    void replacementLimitIsCheckedBeforeAnyModelCall() {
+        UUID id = UUID.randomUUID();
+        var children = java.util.stream.IntStream.range(0, 257)
+                .mapToObj(index -> child(id, UUID.randomUUID(), index, "synthetic text")).toList();
+        when(documentRepository.findById(id, RequestContext.defaults())).thenReturn(Mono.just(document(id)));
+        when(chunkRepository.findByDocumentId(id)).thenReturn(Mono.just(new ChunkedDocument(id, List.of(), children)));
+        StepVerifier.create(service.embedDocument(id, RequestContext.defaults(), true))
+                .expectError(BadRequestException.class).verify();
+        verify(embeddingService, never()).embed(any());
+        verify(writer, never()).commit(any(), any(), any(), any(), any(Boolean.class), any());
+    }
+
     private DocumentMetadata document(UUID documentId) {
         return DocumentMetadata.stored(
                 documentId,
@@ -179,15 +195,4 @@ class ChildChunkEmbeddingServiceTest {
         return new ChildChunk(UUID.randomUUID(), documentId, parentId, chunkIndex, text, 0, text.length(), 2, FIXED_TIME);
     }
 
-    private ChildChunkEmbedding embeddingFor(ChildChunk childChunk) {
-        return new ChildChunkEmbedding(
-                childChunk.id(),
-                childChunk.documentId(),
-                MODEL_INFO.provider(),
-                MODEL_INFO.modelName(),
-                MODEL_INFO.dimension(),
-                FIXED_TIME,
-                FIXED_TIME
-        );
-    }
 }

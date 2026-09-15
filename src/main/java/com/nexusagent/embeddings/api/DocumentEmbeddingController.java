@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
@@ -25,10 +26,13 @@ public class DocumentEmbeddingController {
     @PostMapping("/embed")
     public Mono<EmbeddingStatusResponse> embed(
             @PathVariable UUID documentId,
+            @RequestParam(defaultValue = "false") boolean replaceExisting,
             @RequestHeader(name = RequestContext.TENANT_HEADER, required = false) String tenantId,
             @RequestHeader(name = RequestContext.ACTOR_HEADER, required = false) String actorId
     ) {
-        return childChunkEmbeddingService.embedDocument(documentId, RequestContext.fromHeaders(tenantId, actorId))
+        RequestContext context = RequestContext.fromHeaders(tenantId, actorId);
+        return (replaceExisting ? childChunkEmbeddingService.embedDocument(documentId, context, true)
+                : childChunkEmbeddingService.embedDocument(documentId, context))
                 .map(EmbeddingStatusResponse::from);
     }
 

@@ -3,7 +3,7 @@ package com.nexusagent.chunking.application;
 import java.util.List;
 
 import com.nexusagent.chunking.domain.ExtractedDocumentText;
-import com.nexusagent.common.error.BadRequestException;
+import com.nexusagent.enterprise.ingestion.IngestionFailure;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -22,7 +22,7 @@ public class DocumentTextExtractionService {
                 .filter(extractor -> extractor.supports(document))
                 .findFirst()
                 .map(extractor -> extractor.extract(document))
-                .orElseGet(() -> Mono.error(new BadRequestException(
+                .orElseGet(() -> Mono.error(new IngestionFailure("UNSUPPORTED_TYPE",
                         "Unsupported document type for text extraction: " + document.contentType()
                 )));
     }

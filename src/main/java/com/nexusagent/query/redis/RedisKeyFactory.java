@@ -11,10 +11,20 @@ import java.util.stream.Collectors;
 import com.nexusagent.context.application.ContextProperties;
 import com.nexusagent.query.application.QueryCacheKey;
 import com.nexusagent.retrieval.application.RetrievalProperties;
+import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
 
 public class RedisKeyFactory {
 
-    private static final String CACHE_SCHEMA = "context-cache-v1";
+    private static final String CACHE_SCHEMA = "context-cache-v2";
+    private final EmbeddingModelInfo embeddingModel;
+
+    public RedisKeyFactory() {
+        this(new EmbeddingModelInfo("local", "local-deterministic-hash-384", 384));
+    }
+
+    public RedisKeyFactory(EmbeddingModelInfo embeddingModel) {
+        this.embeddingModel = java.util.Objects.requireNonNull(embeddingModel);
+    }
 
     public String sessionRecent(String sessionId) {
         return "session:%s:recent".formatted(sessionId);
@@ -58,6 +68,9 @@ public class RedisKeyFactory {
                 : Math.min(key.contextBudgetChars(), contextProperties.getMaxBudgetChars());
         String canonical = """
                 schema=%s
+                embeddingProvider=%s
+                embeddingModel=%s
+                embeddingDimension=%d
                 tenantId=%s
                 actorId=%s
                 question=%s
@@ -71,6 +84,9 @@ public class RedisKeyFactory {
                 contextMaxBudgetChars=%d
                 """.formatted(
                 CACHE_SCHEMA,
+                embeddingModel.provider(),
+                embeddingModel.modelName(),
+                embeddingModel.dimension(),
                 key.tenantId(),
                 key.actorId(),
                 normalizedQuestion,

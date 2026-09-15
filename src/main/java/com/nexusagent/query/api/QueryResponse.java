@@ -16,6 +16,17 @@ public record QueryResponse(
         RetrievalDebugResponse retrievalDebug,
         ContextDebugResponse contextDebug,
         List<String> limitations,
-        String retrievalCacheStatus
+        String retrievalCacheStatus,
+        String answerStatus,
+        String answerProvider,
+        String answerModel,
+        List<QueryStageEvent> stages,
+        QueryScopeSummary scope
 ) {
+    public QueryResponse(String traceId, String answer, List<Citation> citations, String finalContextText,
+                         RetrievalDebugResponse retrievalDebug, ContextDebugResponse contextDebug,
+                         List<String> limitations, String retrievalCacheStatus) {
+        this(traceId, answer, citations, finalContextText, retrievalDebug, contextDebug, limitations,
+                retrievalCacheStatus, null, null, null, null, null);
+    }
 }

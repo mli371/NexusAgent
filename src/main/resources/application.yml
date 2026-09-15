@@ -46,6 +46,26 @@ spring:
     max-in-memory-size: 1MB
 
 nexus:
+  openai:
+    api-key: ${NEXUS_LLM_API_KEY:}
+    answer-model: ${NEXUS_LLM_MODEL:gpt-5.6-luna}
+    embedding-timeout: ${NEXUS_OPENAI_EMBEDDING_TIMEOUT:20s}
+    answer-timeout: ${NEXUS_OPENAI_ANSWER_TIMEOUT:90s}
+  agent:
+    enabled: ${NEXUS_AGENT_ENABLED:false}
+    worker-mode: ${NEXUS_AGENT_WORKER_MODE:scripted}
+    worker-token: ${NEXUS_AGENT_WORKER_TOKEN:}
+    provider: ${NEXUS_LLM_PROVIDER:}
+    model: ${NEXUS_LLM_MODEL:}
+    lease: ${NEXUS_AGENT_LEASE:45s}
+    active-timeout: ${NEXUS_AGENT_ACTIVE_TIMEOUT:180s}
+    tool-timeout: ${NEXUS_AGENT_TOOL_TIMEOUT:10s}
+    max-tools: ${NEXUS_AGENT_MAX_TOOLS:30}
+    max-rounds: ${NEXUS_AGENT_MAX_ROUNDS:12}
+    approval-ttl: ${NEXUS_AGENT_APPROVAL_TTL:30m}
+    max-recoveries: ${NEXUS_AGENT_MAX_RECOVERIES:3}
+    event-poll-interval: ${NEXUS_AGENT_EVENT_POLL_INTERVAL:1s}
+    max-events: ${NEXUS_AGENT_MAX_EVENTS:500}
   redis:
     enabled: ${NEXUS_REDIS_ENABLED:true}
     recent-session-ttl: ${NEXUS_REDIS_RECENT_SESSION_TTL:24h}
@@ -65,6 +85,7 @@ nexus:
   embeddings:
     provider: ${NEXUS_EMBEDDINGS_PROVIDER:local}
     dimension: ${NEXUS_EMBEDDINGS_DIMENSION:384}
+    model: ${NEXUS_EMBEDDINGS_MODEL:text-embedding-3-small}
   retrieval:
     default-top-k: ${NEXUS_RETRIEVAL_DEFAULT_TOP_K:10}
     max-top-k: ${NEXUS_RETRIEVAL_MAX_TOP_K:50}
@@ -73,6 +94,13 @@ nexus:
     default-budget-chars: ${NEXUS_CONTEXT_DEFAULT_BUDGET_CHARS:4000}
     max-budget-chars: ${NEXUS_CONTEXT_MAX_BUDGET_CHARS:12000}
   query:
+    answer-provider: ${NEXUS_ANSWER_PROVIDER:local}
+    live-context-timeout: ${NEXUS_LIVE_CONTEXT_TIMEOUT:45s}
+    state-timeout: ${NEXUS_QUERY_STATE_TIMEOUT:2s}
+    live-cache-enabled: ${NEXUS_LIVE_CACHE_ENABLED:true}
+    live-cache-ttl: ${NEXUS_LIVE_CACHE_TTL:15m}
+    live-cache-timeout: ${NEXUS_LIVE_CACHE_TIMEOUT:500ms}
+    live-cache-max-bytes: ${NEXUS_LIVE_CACHE_MAX_BYTES:131072}
     context-timeout: ${NEXUS_QUERY_CONTEXT_TIMEOUT:20s}
     answer-timeout: ${NEXUS_QUERY_ANSWER_TIMEOUT:5s}
   storage:

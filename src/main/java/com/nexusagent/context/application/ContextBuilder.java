@@ -3,10 +3,12 @@ package com.nexusagent.context.application;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 import com.nexusagent.common.context.RequestContext;
+import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.context.domain.Citation;
 import com.nexusagent.context.domain.ContextBuildResult;
@@ -63,21 +65,25 @@ public class ContextBuilder {
             int contextBudgetChars = normalizeBudget(requestedContextBudgetChars);
             List<UUID> normalizedDocumentIds = documentIds == null ? List.of() : List.copyOf(documentIds);
             return hybridRetrievalService.retrieve(query, normalizedDocumentIds, topK, effectiveContext)
-                    .flatMap(retrievalResult -> {
-                        List<RerankedCandidate> rerankedCandidates = reranker.rerank(
+                    .flatMap(retrievalResult -> StageObservation.observe("reranking",
+                            () -> Mono.fromSupplier(() -> reranker.rerank(
                                 retrievalResult.query(),
                                 retrievalResult.fusedCandidates()
-                        );
-                        return parentContextExpansionService.expand(rerankedCandidates, effectiveContext)
-                                .map(expandedCandidates -> buildResult(
+                        )), rows -> Map.of("candidateCount", rows.size(), "reranker", reranker.name()))
+                            .flatMap(rerankedCandidates -> StageObservation.observe("parent_expansion",
+                                    () -> parentContextExpansionService.expand(rerankedCandidates, effectiveContext),
+                                    rows -> Map.of("expandedCount", rows.size()))
+                                .flatMap(expandedCandidates -> StageObservation.observe("context_building",
+                                        () -> Mono.fromSupplier(() -> buildResult(
                                         retrievalResult.query(),
                                         retrievalResult.fusedCandidates().size(),
                                         retrievalResult,
                                         rerankedCandidates,
                                         expandedCandidates,
                                         contextBudgetChars
-                                ));
-                    });
+                                )), result -> Map.of("parentCount", result.expandedParentContexts().size(),
+                                        "citationCount", result.citations().size(),
+                                        "formattedChars", result.finalContextText().length())))));
         });
     }
 

@@ -5,6 +5,7 @@ import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.reactive.resource.NoResourceFoundException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -16,6 +17,19 @@ import org.springframework.web.server.ServerWebInputException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(OperationException.class)
+    public ResponseEntity<java.util.Map<String, Object>> handleOperation(
+            OperationException exception, ServerWebExchange exchange) {
+        String traceId = exception instanceof com.nexusagent.query.live.QueryFailure failure
+                ? failure.traceId() : java.util.UUID.randomUUID().toString();
+        log.warn("operation_failed traceId={} code={}", traceId, exception.code());
+        return ResponseEntity.status(exception.status()).contentType(MediaType.APPLICATION_JSON).body(java.util.Map.of(
+                "timestamp", Instant.now(), "status", exception.status().value(),
+                "error", exception.status().getReasonPhrase(), "code", exception.code(),
+                "message", exception.getMessage(), "path", exchange.getRequest().getPath().value(),
+                "traceId", traceId));
+    }
 
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<ApiError> handleBadRequest(BadRequestException exception, ServerWebExchange exchange) {
@@ -51,6 +65,6 @@ public class GlobalExceptionHandler {
                 message,
                 exchange.getRequest().getPath().value()
         );
-        return ResponseEntity.status(status).body(error);
+        return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(error);
     }
 }

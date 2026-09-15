@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 @Service
+@org.springframework.context.annotation.Primary
 public class LocalTemplateAnswerGenerator implements AnswerGenerator {
 
     private static final int MAX_CONTEXT_SNIPPET_CHARS = 700;

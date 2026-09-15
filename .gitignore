@@ -17,3 +17,13 @@ tmp/
 *.p12
 *.jks
 secrets/
+node_modules/
+workers/pi-worker/dist/
+.agent-worker/
+.superpowers/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+# Private interview preparation, not project documentation.
+docs/NexusAgent-Interview-Notes.md
+docs/NexusAgent-AI-Interview-Context.md

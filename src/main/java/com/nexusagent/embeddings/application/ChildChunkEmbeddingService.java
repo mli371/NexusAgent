@@ -2,16 +2,17 @@ package com.nexusagent.embeddings.application;
 
 import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import com.nexusagent.chunking.domain.ChildChunk;
 import com.nexusagent.chunking.domain.ChunkedDocument;
 import com.nexusagent.chunking.repository.ChunkRepository;
 import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.common.error.NotFoundException;
+import com.nexusagent.common.error.OperationException;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.repository.DocumentRepository;
 import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
@@ -21,6 +22,7 @@ import com.nexusagent.enterprise.audit.AuditEventType;
 import com.nexusagent.enterprise.audit.AuditService;
 import com.nexusagent.enterprise.ingestion.IngestionJobService;
 import com.nexusagent.enterprise.ingestion.IngestionJobType;
+import com.nexusagent.enterprise.ingestion.IngestionFailure;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -39,6 +41,7 @@ public class ChildChunkEmbeddingService {
     private final IngestionJobService ingestionJobService;
     private final AuditService auditService;
     private final Clock clock;
+    private final EmbeddingWriteService embeddingWriteService;
 
     public ChildChunkEmbeddingService(
             DocumentRepository documentRepository,
@@ -47,7 +50,8 @@ public class ChildChunkEmbeddingService {
             ChildChunkEmbeddingRepository embeddingRepository,
             IngestionJobService ingestionJobService,
             AuditService auditService,
-            Clock clock
+            Clock clock,
+            EmbeddingWriteService embeddingWriteService
     ) {
         this.documentRepository = documentRepository;
         this.chunkRepository = chunkRepository;
@@ -56,6 +60,7 @@ public class ChildChunkEmbeddingService {
         this.ingestionJobService = ingestionJobService;
         this.auditService = auditService;
         this.clock = clock;
+        this.embeddingWriteService = embeddingWriteService;
     }
 
     public Mono<EmbeddingStatus> embedDocument(UUID documentId) {
@@ -63,13 +68,17 @@ public class ChildChunkEmbeddingService {
     }
 
     public Mono<EmbeddingStatus> embedDocument(UUID documentId, RequestContext context) {
+        return embedDocument(documentId, context, false);
+    }
+
+    public Mono<EmbeddingStatus> embedDocument(UUID documentId, RequestContext context, boolean replaceExisting) {
         RequestContext effectiveContext = context == null ? RequestContext.defaults() : context;
         return loadChunkedDocument(documentId, effectiveContext)
                 .flatMap(loaded -> ingestionJobService.run(
                         loaded.document().id(),
                         loaded.document().tenantId(),
-                        IngestionJobType.EMBED,
-                        embedLoadedDocument(loaded)
+                        replaceExisting ? IngestionJobType.REEMBED : IngestionJobType.EMBED,
+                        embedLoadedDocument(loaded, effectiveContext, replaceExisting)
                                 .flatMap(status -> auditEmbedded(loaded.document(), effectiveContext, status)
                                         .thenReturn(status))
                 ));
@@ -77,6 +86,14 @@ public class ChildChunkEmbeddingService {
 
     public Mono<EmbeddingStatus> getStatus(UUID documentId) {
         return getStatus(documentId, RequestContext.defaults());
+    }
+
+    /** Does not create a second job or replace existing embeddings. */
+    public Mono<EmbeddingStatus> executeApproved(UUID documentId, RequestContext context, UUID jobId, String traceId) {
+        return ingestionJobService.runExisting(jobId, documentId, context.tenantId(), IngestionJobType.EMBED,
+                loadChunkedDocument(documentId, context).flatMap(loaded -> embedLoadedDocument(loaded, context, false)
+                        .flatMap(status -> auditEmbedded(loaded.document(), context, status).thenReturn(status))))
+                .contextWrite(values -> values.put("ingestionTraceId", traceId));
     }
 
     public Mono<EmbeddingStatus> getStatus(UUID documentId, RequestContext context) {
@@ -91,14 +108,33 @@ public class ChildChunkEmbeddingService {
                         .map(chunkedDocument -> new LoadedChunkedDocument(document, chunkedDocument)));
     }
 
-    private Mono<EmbeddingStatus> embedLoadedDocument(LoadedChunkedDocument loaded) {
+    private Mono<EmbeddingStatus> embedLoadedDocument(LoadedChunkedDocument loaded, RequestContext context, boolean replaceExisting) {
         ChunkedDocument chunkedDocument = loaded.chunkedDocument();
+        EmbeddingModelInfo model = embeddingService.modelInfo();
+        if (replaceExisting && (chunkedDocument.childChunks().size() > 256
+                || chunkedDocument.childChunks().stream().mapToLong(child -> child.text().length()).sum() > 1_000_000)) {
+            return Mono.error(new BadRequestException("Re-embedding is limited to 256 child chunks and 1000000 characters"));
+        }
         return requireChildChunks(chunkedDocument)
-                .then(Mono.defer(() -> embeddingRepository.findEmbeddedChildChunkIds(chunkedDocument.documentId()).collectList()))
+                .then(Mono.defer(() -> embeddingRepository.coverage(chunkedDocument.documentId(), model)))
+                .flatMap(coverage -> !replaceExisting && coverage.mismatchedCount() > 0
+                        ? Mono.error(OperationException.modelMismatch())
+                        : embeddingRepository.findEmbeddedChildChunkIds(chunkedDocument.documentId()).collectList())
                 .map(Set::copyOf)
-                .flatMapMany(embeddedIds -> Flux.fromIterable(chunkedDocument.childChunks())
-                        .filter(childChunk -> !embeddedIds.contains(childChunk.id())))
-                .concatMap(this::embedChildChunk)
+                .flatMap(embeddedIds -> {
+                    Flux<EmbeddingWriteService.PendingEmbedding> generated = Flux.fromIterable(chunkedDocument.childChunks())
+                            .filter(child -> replaceExisting || !embeddedIds.contains(child.id()))
+                            .concatMap(child -> documentRepository.findById(chunkedDocument.documentId(), context)
+                                    .switchIfEmpty(Mono.error(new NotFoundException("Document not found")))
+                                    .flatMap(document -> embeddingService.embed(child.text()))
+                                    .map(vector -> new EmbeddingWriteService.PendingEmbedding(child, vector)));
+                    if (replaceExisting) {
+                        return generated.collectList().flatMap(vectors -> embeddingWriteService.commit(
+                                chunkedDocument, vectors, model, context, true, OffsetDateTime.now(clock)));
+                    }
+                    return generated.concatMap(vector -> embeddingWriteService.commit(chunkedDocument,
+                            List.of(vector), model, context, false, OffsetDateTime.now(clock))).then();
+                })
                 .then(Mono.defer(() -> statusFor(chunkedDocument)))
                 .doOnSuccess(status -> log.info(
                         "document_embedded documentId={} tenantId={} childChunks={} embeddedChildChunks={} complete={}",
@@ -112,45 +148,23 @@ public class ChildChunkEmbeddingService {
 
     private Mono<Void> requireChildChunks(ChunkedDocument chunkedDocument) {
         if (chunkedDocument.childChunks().isEmpty()) {
-            return Mono.error(new BadRequestException("Document must be chunked before embedding"));
+            return Mono.error(new IngestionFailure("CHUNKING_REQUIRED", "Document must be chunked before embedding"));
         }
         return Mono.empty();
     }
 
-    private Mono<Void> embedChildChunk(ChildChunk childChunk) {
-        OffsetDateTime timestamp = OffsetDateTime.now(clock);
-        EmbeddingModelInfo modelInfo = embeddingService.modelInfo();
-        return embeddingService.embed(childChunk.text())
-                .flatMap(embedding -> embeddingRepository.upsert(childChunk, embedding, modelInfo, timestamp))
-                .then();
-    }
-
     private Mono<EmbeddingStatus> statusFor(ChunkedDocument chunkedDocument) {
-        return embeddingRepository.countByDocumentId(chunkedDocument.documentId())
-                .map(embeddedCount -> toStatus(chunkedDocument, embeddedCount));
-    }
-
-    private EmbeddingStatus toStatus(ChunkedDocument chunkedDocument, long embeddedCount) {
-        int childChunkCount = chunkedDocument.childChunks().size();
-        int embeddedChildChunkCount = Math.toIntExact(embeddedCount);
-        int missingChildChunkCount = Math.max(0, childChunkCount - embeddedChildChunkCount);
         EmbeddingModelInfo modelInfo = embeddingService.modelInfo();
-        return new EmbeddingStatus(
-                chunkedDocument.documentId(),
-                childChunkCount,
-                embeddedChildChunkCount,
-                missingChildChunkCount,
-                childChunkCount > 0 && missingChildChunkCount == 0,
-                modelInfo.provider(),
-                modelInfo.modelName(),
-                modelInfo.dimension()
-        );
+        return embeddingRepository.coverage(chunkedDocument.documentId(), modelInfo)
+                .map(coverage -> new EmbeddingStatus(chunkedDocument.documentId(), coverage.childCount(),
+                        coverage.embeddedCount(), coverage.missingCount(), coverage.complete(), modelInfo.provider(),
+                        modelInfo.modelName(), modelInfo.dimension(), coverage.matchingCount(), coverage.mismatchedCount()));
     }
 
     private Mono<Void> auditEmbedded(DocumentMetadata document, RequestContext context, EmbeddingStatus status) {
-        return auditService.record(
+        return Mono.deferContextual(values -> auditService.record(
                 context,
-                "embed-" + document.id(),
+                values.getOrDefault("ingestionTraceId", "embed-" + document.id()),
                 AuditEventType.DOCUMENT_EMBEDDED,
                 "document",
                 document.id(),
@@ -163,7 +177,7 @@ public class ChildChunkEmbeddingService {
                         "modelName", status.modelName(),
                         "dimension", status.dimension()
                 )
-        );
+        ));
     }
 
     private record LoadedChunkedDocument(

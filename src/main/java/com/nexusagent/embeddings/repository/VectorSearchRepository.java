@@ -3,6 +3,7 @@ package com.nexusagent.embeddings.repository;
 import com.nexusagent.common.context.RequestContext;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
 import com.nexusagent.embeddings.domain.VectorSearchResult;
+import com.nexusagent.embeddings.application.EmbeddingProvider;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import java.util.List;
@@ -15,9 +16,11 @@ import reactor.core.publisher.Flux;
 public class VectorSearchRepository {
 
     private final DatabaseClient databaseClient;
+    private final EmbeddingProvider embeddingProvider;
 
-    public VectorSearchRepository(DatabaseClient databaseClient) {
+    public VectorSearchRepository(DatabaseClient databaseClient, EmbeddingProvider embeddingProvider) {
         this.databaseClient = databaseClient;
+        this.embeddingProvider = embeddingProvider;
     }
 
     public Flux<VectorSearchResult> search(EmbeddingVector queryEmbedding, int limit) {
@@ -56,6 +59,7 @@ public class VectorSearchRepository {
                         CROSS JOIN query_embedding
                         WHERE d.tenant_id = :tenantId
                           AND (d.visibility = 'TENANT' OR d.owner_id = :actorId)
+                          AND e.provider = :provider AND e.model_name = :model AND e.dimension = :dimension
                         %s
                         ORDER BY e.embedding <=> query_embedding.embedding
                         LIMIT :limit
@@ -65,7 +69,10 @@ public class VectorSearchRepository {
                 .bind("queryEmbedding", queryEmbedding.toPgVectorLiteral())
                 .bind("limit", limit)
                 .bind("tenantId", effectiveContext.tenantId())
-                .bind("actorId", effectiveContext.actorId());
+                .bind("actorId", effectiveContext.actorId())
+                .bind("provider", embeddingProvider.modelInfo().provider())
+                .bind("model", embeddingProvider.modelInfo().modelName())
+                .bind("dimension", embeddingProvider.modelInfo().dimension());
         spec = bindDocumentIds(spec, documentIds);
         return spec
                 .map(this::mapResult)

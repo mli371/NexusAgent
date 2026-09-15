@@ -7,6 +7,10 @@ public class EmbeddingProperties {
 
     private String provider = "local";
     private int dimension = 384;
+    private String model = "text-embedding-3-small";
+
+    public String getModel() { return model; }
+    public void setModel(String model) { this.model = model; }
 
     public String getProvider() {
         return provider;

@@ -9,6 +9,11 @@ public record QueryRequest(
         List<UUID> documentIds,
         Integer topK,
         Integer contextBudgetChars,
-        Boolean debug
+        Boolean debug,
+        String scope
 ) {
+    public QueryRequest(String sessionId, String question, List<UUID> documentIds, Integer topK,
+                        Integer contextBudgetChars, Boolean debug) {
+        this(sessionId, question, documentIds, topK, contextBudgetChars, debug, null);
+    }
 }

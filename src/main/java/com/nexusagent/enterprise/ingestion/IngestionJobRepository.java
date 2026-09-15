@@ -25,8 +25,13 @@ public class IngestionJobRepository {
             IngestionJobType jobType,
             OffsetDateTime timestamp
     ) {
+        return createLinked(documentId, tenantId, jobType, timestamp, null, null);
+    }
+
+    public Mono<IngestionJob> createLinked(UUID documentId, String tenantId, IngestionJobType jobType,
+                                          OffsetDateTime timestamp, UUID executionId, String traceId) {
         UUID jobId = UUID.randomUUID();
-        return databaseClient.sql("""
+        DatabaseClient.GenericExecuteSpec insert = databaseClient.sql("""
                         INSERT INTO ingestion_jobs (
                             id,
                             document_id,
@@ -37,7 +42,7 @@ public class IngestionJobRepository {
                             started_at,
                             finished_at,
                             created_at,
-                            updated_at
+                            updated_at, agent_execution_id, trace_id
                         )
                         VALUES (
                             :id,
@@ -49,7 +54,7 @@ public class IngestionJobRepository {
                             :startedAt,
                             NULL,
                             :createdAt,
-                            :updatedAt
+                            :updatedAt, :execution, :trace
                         )
                         RETURNING *
                         """)
@@ -60,9 +65,18 @@ public class IngestionJobRepository {
                 .bind("status", IngestionJobStatus.RUNNING.name())
                 .bind("startedAt", timestamp)
                 .bind("createdAt", timestamp)
-                .bind("updatedAt", timestamp)
-                .map(this::mapRow)
-                .one();
+                .bind("updatedAt", timestamp);
+        insert = executionId == null ? insert.bindNull("execution", UUID.class) : insert.bind("execution", executionId);
+        insert = traceId == null ? insert.bindNull("trace", String.class) : insert.bind("trace", traceId);
+        return insert.map(this::mapRow).one();
+    }
+
+    public Mono<IngestionJob> findRunningLinked(UUID id, UUID documentId, String tenantId, IngestionJobType type) {
+        return databaseClient.sql("""
+                SELECT * FROM ingestion_jobs WHERE id=:id AND document_id=:document AND tenant_id=:tenant
+                    AND job_type=:type AND status='RUNNING' AND agent_execution_id IS NOT NULL
+                """).bind("id", id).bind("document", documentId).bind("tenant", tenantId)
+                .bind("type", type.name()).map(this::mapRow).one();
     }
 
     public Mono<IngestionJob> markSucceeded(UUID jobId, OffsetDateTime timestamp) {
@@ -83,10 +97,15 @@ public class IngestionJobRepository {
     }
 
     public Mono<IngestionJob> markFailed(UUID jobId, String errorMessage, OffsetDateTime timestamp) {
+        return markFailed(jobId, errorMessage, "UNKNOWN", timestamp);
+    }
+
+    public Mono<IngestionJob> markFailed(UUID jobId, String errorMessage, String code, OffsetDateTime timestamp) {
         return databaseClient.sql("""
                         UPDATE ingestion_jobs
                         SET status = :status,
                             error_message = :errorMessage,
+                            error_code = :code,
                             finished_at = :finishedAt,
                             updated_at = :updatedAt
                         WHERE id = :id
@@ -94,6 +113,7 @@ public class IngestionJobRepository {
                         """)
                 .bind("status", IngestionJobStatus.FAILED.name())
                 .bind("errorMessage", truncate(errorMessage))
+                .bind("code", code)
                 .bind("finishedAt", timestamp)
                 .bind("updatedAt", timestamp)
                 .bind("id", jobId)

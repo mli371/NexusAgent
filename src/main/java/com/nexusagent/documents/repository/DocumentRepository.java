@@ -142,6 +142,15 @@ public class DocumentRepository {
                 .then();
     }
 
+    /** Must be subscribed inside the caller's R2DBC transaction. */
+    public Mono<UUID> lockAccessible(UUID id, RequestContext context) {
+        return databaseClient.sql("""
+                SELECT id FROM documents WHERE id = :id AND tenant_id = :tenantId
+                    AND (visibility = 'TENANT' OR owner_id = :actorId) FOR UPDATE
+                """).bind("id", id).bind("tenantId", context.tenantId()).bind("actorId", context.actorId())
+                .map((row, metadata) -> row.get("id", UUID.class)).one();
+    }
+
     public Flux<DocumentMetadata> findAll(int limit, int offset) {
         return databaseClient.sql("""
                         SELECT

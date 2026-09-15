@@ -76,4 +76,18 @@ class DocumentEmbeddingControllerRouteTest {
                 384
         );
     }
+
+    @Test
+    void replacementIsExplicitAndMismatchIs409WithSafeCode() {
+        UUID id = UUID.randomUUID();
+        when(childChunkEmbeddingService.embedDocument(id, RequestContext.defaults(), true)).thenReturn(Mono.just(status(id)));
+        webTestClient.post().uri("/api/v1/documents/{id}/embed?replaceExisting=true", id)
+                .exchange().expectStatus().isOk();
+        verify(childChunkEmbeddingService).embedDocument(id, RequestContext.defaults(), true);
+        when(childChunkEmbeddingService.embedDocument(id, RequestContext.defaults()))
+                .thenReturn(Mono.error(com.nexusagent.common.error.OperationException.modelMismatch()));
+        webTestClient.post().uri("/api/v1/documents/{id}/embed", id).exchange().expectStatus().isEqualTo(409)
+                .expectBody().jsonPath("$.code").isEqualTo("EMBEDDING_MODEL_MISMATCH")
+                .jsonPath("$.traceId").isNotEmpty();
+    }
 }

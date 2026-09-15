@@ -58,17 +58,15 @@ public class ParentContextExpansionService {
     }
 
     private Mono<LoadedDocumentChunks> loadDocumentChunks(UUID documentId, RequestContext context) {
-        return Mono.zip(
-                        documentRepository.findById(documentId, context),
-                        chunkRepository.findByDocumentId(documentId)
-                )
-                .map(tuple -> new LoadedDocumentChunks(
-                        tuple.getT1(),
-                        tuple.getT2().childChunks().stream()
+        return documentRepository.findById(documentId, context)
+                .flatMap(document -> chunkRepository.findByDocumentId(documentId)
+                .map(chunks -> new LoadedDocumentChunks(
+                        document,
+                        chunks.childChunks().stream()
                                 .collect(Collectors.toMap(ChildChunk::id, Function.identity())),
-                        tuple.getT2().parentChunks().stream()
+                        chunks.parentChunks().stream()
                                 .collect(Collectors.toMap(ParentChunk::id, Function.identity()))
-                ));
+                )));
     }
 
     private List<ExpandedCandidateContext> expandCandidates(
@@ -97,7 +95,8 @@ public class ParentContextExpansionService {
 
         ChildChunk childChunk = loadedDocument.childChunksById().get(candidate.candidate().childChunkId());
         ParentChunk parentChunk = loadedDocument.parentChunksById().get(candidate.candidate().parentChunkId());
-        if (childChunk == null || parentChunk == null) {
+        if (childChunk == null || parentChunk == null
+                || !childChunk.parentChunkId().equals(parentChunk.id())) {
             return List.of();
         }
 

@@ -10,7 +10,7 @@ import com.nexusagent.chunking.domain.ExtractedDocumentText;
 import com.nexusagent.chunking.domain.ParentChildChunkPlan;
 import com.nexusagent.chunking.repository.ChunkRepository;
 import com.nexusagent.common.context.RequestContext;
-import com.nexusagent.common.error.BadRequestException;
+import com.nexusagent.enterprise.ingestion.IngestionFailure;
 import com.nexusagent.common.error.NotFoundException;
 import com.nexusagent.documents.domain.DocumentMetadata;
 import com.nexusagent.documents.domain.DocumentStatus;
@@ -82,6 +82,17 @@ public class DocumentChunkingService {
         return getChunks(documentId, RequestContext.defaults());
     }
 
+    /** Java harness entry point: the approval transaction has already created this exact job. */
+    public Mono<ChunkedDocument> executeApproved(UUID documentId, RequestContext context, UUID jobId, String traceId) {
+        return ingestionJobService.runExisting(jobId, documentId, context.tenantId(), IngestionJobType.CHUNK,
+                documentRepository.findById(documentId, context)
+                        .switchIfEmpty(Mono.error(new NotFoundException("Document not found")))
+                        .flatMap(document -> chunkDocument(document, context, false)
+                                .onErrorResume(error -> markChunkingFailed(documentId).onErrorResume(ignored -> Mono.empty())
+                                        .then(Mono.error(error)))))
+                .contextWrite(values -> values.put("ingestionTraceId", traceId));
+    }
+
     public Mono<ChunkedDocument> getChunks(UUID documentId, RequestContext context) {
         return documentRepository.findById(documentId, context)
                 .switchIfEmpty(Mono.error(new NotFoundException("Document not found: " + documentId)))
@@ -128,7 +139,7 @@ public class DocumentChunkingService {
 
     private ExtractedDocumentText requireNonBlankText(ExtractedDocumentText extractedText) {
         if (extractedText.text() == null || extractedText.text().isBlank()) {
-            throw new BadRequestException("Extracted document text is empty");
+            throw new IngestionFailure("EMPTY_TEXT", "Extracted document text is empty");
         }
         return extractedText;
     }
@@ -159,9 +170,9 @@ public class DocumentChunkingService {
             ChunkedDocument chunkedDocument,
             boolean force
     ) {
-        return auditService.record(
+        return Mono.deferContextual(values -> auditService.record(
                 context,
-                (force ? "force-rechunk-" : "chunk-") + document.id(),
+                values.getOrDefault("ingestionTraceId", (force ? "force-rechunk-" : "chunk-") + document.id()),
                 force ? AuditEventType.FORCE_RECHUNKED : AuditEventType.DOCUMENT_CHUNKED,
                 "document",
                 document.id(),
@@ -171,6 +182,6 @@ public class DocumentChunkingService {
                         "childChunkCount", chunkedDocument.childChunks().size(),
                         "force", force
                 )
-        );
+        ));
     }
 }

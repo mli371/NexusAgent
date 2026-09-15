@@ -1,10 +1,12 @@
 package com.nexusagent.retrieval.application;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.nexusagent.common.context.RequestContext;
+import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.embeddings.application.EmbeddingService;
 import com.nexusagent.embeddings.repository.VectorSearchRepository;
 import com.nexusagent.retrieval.domain.SemanticRetrievalCandidate;
@@ -35,9 +37,13 @@ public class SemanticRetrievalService {
             int topK,
             RequestContext context
     ) {
-        AtomicInteger rank = new AtomicInteger(1);
-        return embeddingService.embed(query)
-                .flatMapMany(embedding -> vectorSearchRepository.search(embedding, documentIds, topK, context))
+        return Flux.defer(() -> {
+            AtomicInteger rank = new AtomicInteger(1);
+            return StageObservation.observe("query_embedding", () -> embeddingService.embed(query),
+                            ignored -> Map.of("model", embeddingService.modelInfo().modelName()))
+                .flatMapMany(embedding -> StageObservation.observe("vector_search",
+                        () -> vectorSearchRepository.search(embedding, documentIds, topK, context).collectList(),
+                        rows -> Map.of("candidateCount", rows.size())).flatMapMany(Flux::fromIterable))
                 .map(result -> new SemanticRetrievalCandidate(
                         result.childChunkId(),
                         result.documentId(),
@@ -47,5 +53,6 @@ public class SemanticRetrievalService {
                         rank.getAndIncrement(),
                         result.distance()
                 ));
+        });
     }
 }

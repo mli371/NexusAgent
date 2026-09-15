@@ -34,30 +34,31 @@ public class IngestionJobService {
 
     public <T> Mono<T> run(UUID documentId, String tenantId, IngestionJobType jobType, Mono<T> work) {
         return ingestionJobRepository.createRunning(documentId, tenantId, jobType, OffsetDateTime.now(clock))
-                .flatMap(job -> work
-                        .flatMap(result -> ingestionJobRepository.markSucceeded(job.id(), OffsetDateTime.now(clock))
-                                .doOnSuccess(updated -> log.info(
-                                        "ingestion_job_succeeded jobId={} documentId={} tenantId={} jobType={}",
-                                        updated.id(),
-                                        updated.documentId(),
-                                        updated.tenantId(),
-                                        updated.jobType()
-                                ))
-                                .thenReturn(result))
-                        .onErrorResume(error -> ingestionJobRepository.markFailed(
-                                        job.id(),
-                                        error.getMessage(),
-                                        OffsetDateTime.now(clock)
-                                )
-                                .doOnSuccess(updated -> log.warn(
-                                        "ingestion_job_failed jobId={} documentId={} tenantId={} jobType={} reason={}",
-                                        updated.id(),
-                                        updated.documentId(),
-                                        updated.tenantId(),
-                                        updated.jobType(),
-                                        updated.errorMessage()
-                                ))
-                                .then(Mono.error(error))));
+                .flatMap(job -> track(job, work));
+    }
+
+    public <T> Mono<T> runExisting(UUID jobId, UUID documentId, String tenantId, IngestionJobType type, Mono<T> work) {
+        return ingestionJobRepository.findRunningLinked(jobId, documentId, tenantId, type)
+                .switchIfEmpty(Mono.error(new IllegalStateException("Approved ingestion job is not active")))
+                .flatMap(job -> track(job, work));
+    }
+
+    private <T> Mono<T> track(IngestionJob job, Mono<T> work) {
+        return work.flatMap(result -> ingestionJobRepository.markSucceeded(job.id(), OffsetDateTime.now(clock))
+                        .doOnNext(updated -> log.info(
+                                "ingestion_job_succeeded jobId={} documentId={} tenantId={} jobType={}",
+                                updated.id(), updated.documentId(), updated.tenantId(), updated.jobType()))
+                        .thenReturn(result))
+                .onErrorResume(error -> ingestionJobRepository.markFailed(
+                                job.id(), error.getMessage(), IngestionFailure.code(error), OffsetDateTime.now(clock))
+                        .doOnNext(updated -> log.warn(
+                                "ingestion_job_failed jobId={} documentId={} tenantId={} jobType={} code={}",
+                                updated.id(), updated.documentId(), updated.tenantId(), updated.jobType(), IngestionFailure.code(error)))
+                        .onErrorResume(statusError -> {
+                            log.warn("ingestion_job_status_write_failed jobId={} code={}", job.id(), IngestionFailure.code(statusError));
+                            return Mono.empty();
+                        })
+                        .then(Mono.error(error)));
     }
 
     public Flux<IngestionJob> findForDocument(UUID documentId, RequestContext context) {

@@ -1,0 +1,91 @@
+name: NexusAgent CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: workers/pi-worker/package-lock.json
+      - name: Verify Docker and scripted worker prerequisites
+        run: docker info
+      - run: npm ci --prefix workers/pi-worker
+      - run: npm test --prefix workers/pi-worker
+      - name: Backend tests and executable JAR (no live model keys)
+        run: mvn --batch-mode --no-transfer-progress -Dapi.version=1.44 clean verify
+      - name: Reject silently skipped backend tests
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          reports = glob.glob('target/surefire-reports/TEST-*.xml')
+          assert reports, 'No backend test reports found'
+          skipped = sum(int(ET.parse(p).getroot().attrib.get('skipped', 0)) for p in reports)
+          assert skipped == 0, f'{skipped} tests were skipped; check Docker and worker build'
+          PY
+      - name: Check demo scripts
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          make -n demo
+          git diff --check
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: backend-reports-and-build
+          retention-days: 7
+          path: |
+            target/surefire-reports/
+            target/nexus-agent-*.jar
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Synthetic browser tests (no Java server or model calls)
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: frontend-reports-and-build
+          retention-days: 7
+          path: |
+            frontend/dist/
+            frontend/test-results/
+            frontend/playwright-report/

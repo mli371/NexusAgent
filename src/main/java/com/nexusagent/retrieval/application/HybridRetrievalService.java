@@ -1,9 +1,11 @@
 package com.nexusagent.retrieval.application;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import com.nexusagent.common.context.RequestContext;
+import com.nexusagent.common.observation.StageObservation;
 import com.nexusagent.common.error.BadRequestException;
 import com.nexusagent.retrieval.domain.HybridRetrievalResult;
 import org.slf4j.Logger;
@@ -63,12 +65,12 @@ public class HybridRetrievalService {
                                     effectiveContext
                             ).collectList()
                     )
-                    .map(tuple -> new HybridRetrievalResult(
+                    .flatMap(tuple -> StageObservation.observe("rrf_fusion", () -> Mono.fromSupplier(() -> new HybridRetrievalResult(
                             normalizedQuery,
                             tuple.getT1(),
                             tuple.getT2(),
                             rrfFusionService.fuse(tuple.getT1(), tuple.getT2(), topK)
-                    ))
+                    )), result -> Map.of("candidateCount", result.fusedCandidates().size())))
                     .doOnSuccess(result -> log.info(
                             "retrieval_completed tenantId={} actorId={} vectorCandidates={} fullTextCandidates={} fusedCandidates={} topK={}",
                             effectiveContext.tenantId(),

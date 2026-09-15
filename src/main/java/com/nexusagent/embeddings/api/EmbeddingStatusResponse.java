@@ -12,7 +12,9 @@ public record EmbeddingStatusResponse(
         boolean complete,
         String provider,
         String modelName,
-        int dimension
+        int dimension,
+        int matchingChildChunkCount,
+        int mismatchedChildChunkCount
 ) {
 
     public static EmbeddingStatusResponse from(EmbeddingStatus status) {
@@ -24,7 +26,9 @@ public record EmbeddingStatusResponse(
                 status.complete(),
                 status.provider(),
                 status.modelName(),
-                status.dimension()
+                status.dimension(),
+                status.matchingChildChunkCount(),
+                status.mismatchedChildChunkCount()
         );
     }
 }

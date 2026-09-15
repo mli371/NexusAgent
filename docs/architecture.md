@@ -4,6 +4,15 @@ This document will evolve milestone by milestone. It records the architecture th
 
 ## Purpose
 
+The optional [Agent Harness](agent-harness.md) is a separate extension: Java run management and tools, PostgreSQL durable workflow records, and a TypeScript Pi/scripted worker. Phase 2 adds human approval and Java-only CHUNK/EMBED_MISSING execution. Phase 3 adds bounded lease recovery, exact-job reconciliation, cancellation coordination and replayable GET SSE. State transitions and events use short transactions; external I/O does not hold the run lock. Unknown writes are never blindly redispatched. It leaves the original retrieval architecture below intact. The [live OpenAI `gpt-5.6-luna` smoke test](verification/agent-harness-gpt-5.6-luna.md) covered read-only Phase 1, not Phase 2/3 model-driven acceptance or model quality. See [Phase 3 design review](review/agent-harness-phase-3.md).
+
+Approval and job reservation use short row-locked transactions. Business ingestion
+runs outside those transactions through existing services. The execution ID is
+linked when its job is inserted, not discovered by looking up the latest job.
+Waiting holds neither a Pi session nor an active claim. A fresh session after
+approval receives bounded structured evidence, not restored hidden reasoning.
+An in-flight action with lost ownership is UNKNOWN and cannot replay.
+
 NexusAgent is an Enterprise Knowledge Assistant Backend. It ingests enterprise documents, stores raw files and metadata, chunks text for retrieval, embeds child chunks, retrieves relevant context through hybrid search, and serves query responses with citations.
 
 The system is designed as a maintainable backend project with clear boundaries, practical trade-offs, runnable local dependencies, and explicit limitations.
@@ -11,6 +20,28 @@ The system is designed as a maintainable backend project with clear boundaries, 
 ## Current Architecture
 
 Milestones 1 through 10 are implemented.
+
+The separately reviewed real RAG extension includes provider preparation, an opt-in live query backend and a two-scope learning frontend. With `NEXUS_ANSWER_PROVIDER=openai`, QueryController routes `/query` and `/query/stream` to LiveQueryService; the older QueryOrchestrationService and deterministic `/agent/query` example remain the offline path. Existing diagrams below describe the milestone baseline unless noted.
+
+```text
+QueryController -> LiveQueryService
+  -> input, tenant/owner access and current-model coverage checks
+  -> library ready-document snapshot OR explicitly selected ready documents
+  -> LiveContextService: versioned, tenant/actor-scoped Redis context cache
+  -> miss: existing ContextBuilder; hit: validate cached evidence and skip these stages
+       -> (query embedding -> vector search) || full-text search
+       -> RRF -> heuristic rerank -> parent expansion -> character budget
+  -> current evidence/access recheck
+  -> OpenAI Responses adapter, or explicit abstention without an answer call
+  -> citation subset validation, bounded status/audit/tool summaries
+  -> final evidence/access recheck -> REST response or validated SSE message
+```
+
+An optional Reactor Context observer records actual stage boundaries without changing offline callers. REST and SSE subscribe to the same live pipeline once. Progress summaries omit raw evidence; the final authorized debug response contains retrieval/context details. V10 adds `documents.retrieval_revision` and transactional triggers for chunk/vector/access changes. Cache keys use a database version snapshot; evidence and versions are rechecked before model use and final output. Hits mark skipped stages as cache reuse, not newly executed stages. Live state keys include hashed tenant/actor/session or trace scope; Redis is still short-lived and best-effort. See the [current cache note](learning/live-context-cache-ci.md) and historical [Phase 2 note](learning/rag-02-live-query.md). There is no transaction held across a remote model call.
+
+`QueryLibraryRepository` first filters documents by tenant and TENANT/owner visibility, then aggregates coverage against provider/model/dimension. It reads at most 201 visible IDs to detect the learning limit of 200 and refuses overflow. `LiveQueryGuard` excludes unready documents and passes the same nonempty ready-ID snapshot to both retrieval paths. The snapshot is not a long transaction or a new source of truth. Explicit mode retains the 1–10-document, all-ready contract.
+
+The React QA view issues one POST SSE request, checks trace/sequence/provider/citation associations, and withholds answer text until `completed`. It draws the known pipeline DAG using actual events and displays final authorized evidence separately from static source explanations. Only 12 turns live in memory; identity/view changes abort local work and clear data. This is single-turn RAG, not Pi tool-calling or a persistent conversation. See [Phase 3](learning/rag-03-learning-frontend.md).
 
 ```text
 Client
@@ -376,5 +407,21 @@ com.nexusagent
 - Performance benchmarking and scale claims are intentionally out of scope until the system has realistic workloads and measurements.
 
 ## Future Updates
+
+### Learning Workbench Boundary
+
+The optional React/TypeScript workbench is a client of the Agent Harness, not another orchestrator:
+
+```mermaid
+flowchart LR
+  UI["Learning workbench"] --> Proxy["Loopback Vite: /api/v1 only"]
+  Proxy --> Java["Java ownership / approvals / run API"]
+  Java --> PG["PostgreSQL run, event and tool records"]
+  Worker["Separate scripted / Pi worker"] --> Java
+  PG --> Projection["Allowlisted tool observation projection"]
+  Projection --> UI
+```
+
+The document-processing view follows durable event sequences and rechecks snapshots after reconnects. Only run IDs are retained in browser sessionStorage, partitioned by demo tenant/actor. Actual arguments/results and static function explanations are separate. The browser neither receives worker credentials nor proxies internal worker routes. The later QA view, described above, instead uses ephemeral POST SSE without automatic replay and page-memory-only history. Neither UI adds login or full tracing. See [guide](learning-workbench.md).
 
 Each milestone should update this document when it changes the architecture, data flow, storage model, or integration boundaries.

@@ -186,7 +186,7 @@ public class QueryOrchestrationService {
                             }
                             return Mono.error(unwrapped);
                         })
-                        .flatMap(context -> retrievalCacheService.put(cacheKey, context)
+                        .flatMap(context -> (context.finalContextText().isBlank() ? Mono.<Void>empty() : retrievalCacheService.put(cacheKey, context))
                                 .thenReturn(new ContextPipelineResult(context, "miss")))));
     }
 

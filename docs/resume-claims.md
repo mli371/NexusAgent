@@ -4,6 +4,8 @@ Use claims that match the code. Avoid wording that implies production capabiliti
 
 ## Supported Claims
 
+Optional extension, separate from the frozen MVP: "Built a diagnostic harness with PostgreSQL-backed runs, scoped tools, invocation replay and lease/deadline fencing; added actor-bound approvals for bounded ingestion actions with stale-state checks, exact job linkage and fresh-session continuation. Added bounded worker recovery, conservative uncertain-write reconciliation, cancellation coordination and sequence-based SSE replay." Scripted integration tests cover approval/execution and worker process interruption; the earlier live OpenAI GPT-5.6 Luna smoke covers read-only diagnostics. Neither is a quality benchmark. Do not claim autonomous repairs, general crash recovery, production authorization, exactly-once distributed writes, guaranteed rollback on cancellation, or replacement of the template answer generator.
+
 - Built a Java 17 Spring Boot WebFlux backend for an enterprise knowledge assistant.
 - Built a Java/Spring WebFlux backend for enterprise-aware document retrieval and citation-aware question answering workflows.
 - Implemented raw document upload with MinIO object storage and PostgreSQL metadata.
@@ -22,6 +24,8 @@ Use claims that match the code. Avoid wording that implies production capabiliti
 - Added an enterprise-readiness slice with header-based tenant context, tenant-aware retrieval filtering, audit events, ingestion job status rows, trace propagation, and Actuator health/info.
 - Added enterprise-readiness slice with tenant-aware request context, repository-level tenant filtering, tenant-scoped Redis cache keys, audit events, ingestion job tracking, and trace-friendly observability.
 - Wrote unit and integration-style tests covering ingestion, chunking, embeddings, retrieval, context building, query orchestration, Redis behavior, and workflow decisions.
+- Added versioned, tenant/actor-scoped Redis context caching to opt-in live RAG, with transactional PostgreSQL revision invalidation, evidence/access rechecks, bounded values and failure fallback. Final model answers are not cached.
+- Configured GitHub Actions for backend/worker and frontend test/build checks, including isolated database tests and synthetic browser tests; no automatic deployment or performance claims.
 
 ## Safe Resume Wording
 
@@ -49,7 +53,7 @@ Added enterprise-readiness skeletons for tenant-aware filtering, audit events, i
 
 - "Ready for production deployment."
 - "Autonomous multi-agent system."
-- "Real LLM-powered answer generation."
+- "The offline/default template generator is a real LLM" or "live answers have evaluated production quality." Opt-in real OpenAI answer generation is implemented, but that is separate from quality evaluation.
 - "Cross-encoder reranking."
 - "Benchmarked high-scale vector search."
 - "Kubernetes-native deployment."

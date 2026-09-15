@@ -7,6 +7,7 @@ import com.nexusagent.chunking.domain.ChildChunk;
 import com.nexusagent.embeddings.domain.ChildChunkEmbedding;
 import com.nexusagent.embeddings.domain.EmbeddingModelInfo;
 import com.nexusagent.embeddings.domain.EmbeddingVector;
+import com.nexusagent.embeddings.domain.EmbeddingCoverage;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -100,6 +101,21 @@ public class ChildChunkEmbeddingRepository {
                 .map((row, rowMetadata) -> requireLong(row, "embedding_count"))
                 .one()
                 .defaultIfEmpty(0L);
+    }
+
+    public Mono<EmbeddingCoverage> coverage(UUID documentId, EmbeddingModelInfo model) {
+        return databaseClient.sql("""
+                SELECT COUNT(c.id) AS child_count, COUNT(e.child_chunk_id) AS embedded_count,
+                    COUNT(e.child_chunk_id) FILTER (WHERE e.provider = :provider
+                        AND e.model_name = :model AND e.dimension = :dimension) AS matching_count
+                FROM child_chunks c
+                LEFT JOIN child_chunk_embeddings e ON e.child_chunk_id = c.id
+                WHERE c.document_id = :documentId
+                """).bind("documentId", documentId).bind("provider", model.provider())
+                .bind("model", model.modelName()).bind("dimension", model.dimension())
+                .map((row, metadata) -> new EmbeddingCoverage(Math.toIntExact(requireLong(row, "child_count")),
+                        Math.toIntExact(requireLong(row, "embedded_count")), Math.toIntExact(requireLong(row, "matching_count"))))
+                .one();
     }
 
     private ChildChunkEmbedding mapEmbedding(Row row, RowMetadata rowMetadata) {

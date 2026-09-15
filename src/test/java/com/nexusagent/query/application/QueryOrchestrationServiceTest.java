@@ -261,7 +261,8 @@ class QueryOrchestrationServiceTest {
     @Test
     void contextTimeoutFallsBackToEmptyContext() {
         LocalTemplateAnswerGenerator localGenerator = new LocalTemplateAnswerGenerator();
-        QueryOrchestrationService service = service(localGenerator, Duration.ofMillis(10));
+        MapRetrievalCacheService cache = new MapRetrievalCacheService();
+        QueryOrchestrationService service = service(localGenerator, Duration.ofMillis(10), cache, new NoOpToolOutputStore());
 
         when(contextBuilder.build("security policy", List.of(), 5, 1000, RequestContext.defaults())).thenReturn(Mono.never());
 
@@ -271,6 +272,7 @@ class QueryOrchestrationServiceTest {
                     assertThat(response.citations()).isEmpty();
                     assertThat(response.contextDebug()).isNotNull();
                     assertThat(response.contextDebug().debugMetadata().reranker()).isEqualTo("timeout-fallback");
+                    assertThat(cache.keys()).isEmpty();
                 })
                 .verifyComplete();
     }

@@ -7,6 +7,11 @@ public record QueryStreamEvent(
         String type,
         String traceId,
         String message,
-        QueryResponse response
+        QueryResponse response,
+        QueryStageEvent stage,
+        String code
 ) {
+    public QueryStreamEvent(String type, String traceId, String message, QueryResponse response) {
+        this(type, traceId, message, response, null, null);
+    }
 }
